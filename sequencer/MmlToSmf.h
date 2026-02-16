@@ -8,11 +8,20 @@
 
 namespace rlib::sequencer {
 
-	inline midi::Smf mmlToSmf(const std::string& mml) {
+	struct Result {
+		midi::Smf	smf;
+		std::vector<MmlCompiler::Result::Error> errors;
+		bool hasError() const { return errors.size() > 0; };
+	};
+	inline Result mmlToSmf(const std::string& mml) {
+		Result r;
 		using Smf = midi::Smf;
 		const auto result = MmlCompiler::compile(mml);
-		Smf smf;
-		for (const auto& port : result) {
+		if (result.hasError()) {
+			r.errors = result.errors;
+			return r;
+		}
+		for (const auto& port : result.ports) {
 			Smf::Track track;
 
 			track.events.emplace(Smf::Event(0, std::make_shared<midi::EventMeta>(midi::EventMeta::createText(midi::EventMeta::Type::sequenceName, port.name))));
@@ -56,15 +65,14 @@ namespace rlib::sequencer {
 						track.events.insert(Smf::Event(e.position, std::make_shared<midi::EventMeta>(midi::EventMeta::createText(static_cast<midi::EventMeta::Type>(e.type), e.data))));
 					}},
 				};
-				const auto &ev = *event;
+				const auto& ev = *event;
 				if (auto i = map.find(typeid(ev)); i != map.end()) {
 					(i->second)(track, port, *event);
 				} else assert(false);
 			}
-			smf.tracks.emplace_back(std::move(track));
+			r.smf.tracks.emplace_back(std::move(track));
 		}
-
-		return smf;
+		return r;
 	}
 
 }
