@@ -1,25 +1,31 @@
 ﻿
 #include <bits/stdc++.h>
-
 #include <boost/program_options.hpp>
 
-#include "./stringformat/StringFormat.h"
 #include "./sequencer/MmlToSmf.h"
 
 using namespace rlib;
+using namespace rlib::sequencer;
 
 int main(const int argc, const char* const argv[])
 {
 	namespace po = boost::program_options;
 
 	try {
-		std::string input, output;
+		std::string input = "-", output = "-";
+		std::string format = "text";
 		po::options_description desc("options");
 		desc.add_options()
 			("version", "show version")
 			("help", "show help")
-			("input,i", po::value(&input)->required(), "input file (required)")		// 入力ファイルパス(mml)
-			("output,o", po::value(&output)->required(), "output file (required)")	// 出力ファイル(mid)
+			("format", po::value(&format)
+				->default_value("text")
+				->notifier([](const std::string& f) {
+					if (f != "text" && f != "json") throw po::validation_error(po::validation_error::invalid_option_value, "format", f);
+				}),
+				"output format: text (default) or json")
+			("input,i", po::value(&input), "input file (mml)")		// 入力ファイルパス(mml)
+			("output,o", po::value(&output), "output file (mid)")	// 出力ファイル(mid)
 			;
 
 		po::positional_options_description pd;
@@ -29,7 +35,7 @@ int main(const int argc, const char* const argv[])
 		po::store(po::command_line_parser(argc, argv).options(desc).positional(pd).run(), vm);
 
 		if (vm.count("version")) {
-			std::cout << "mmltosmf version 1.2.3" << std::endl;
+			std::cout << "mmltosmf version 1.2.4" << std::endl;
 			return 0;
 		}
 
@@ -41,49 +47,37 @@ int main(const int argc, const char* const argv[])
 		po::notify(vm);
 
 		const std::string mml = [&] {
-			auto path = std::filesystem::u8path(input);
-			std::fstream fs(path, std::ios::in | std::ios::binary);
-			if (fs.fail()) {
-				throw std::runtime_error("input file open error.");
+			if (input != "-") {
+				auto path = std::filesystem::u8path(input);
+				std::ifstream fs(path, std::ios::in | std::ios::binary);
+				if (fs.fail()) throw std::runtime_error("input file open error.");
+				const std::istreambuf_iterator<char> begin(fs);
+				return std::string(begin, std::istreambuf_iterator<char>());
 			}
-			const std::istreambuf_iterator<char> begin(fs);
-			return std::string(begin, std::istreambuf_iterator<char>());
+			return std::string(std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>());	// stdin
 		}();
 
-		try {
-			const midi::Smf smf = sequencer::mmlToSmf(mml);
-			auto fileImage = smf.getFileImage();
-
+		const auto r = mmlToSmf(mml);
+		if (r.hasError()) {
+			const auto err = format == "json" ? MmlCompiler::Result::getJson(mml, r.errors) : MmlCompiler::Result::getText(mml, r.errors);
+			std::cerr << err << std::endl;
+			return 1;
+		}
+		const auto fileImage = r.smf.getFileImage();
+		if (output != "-") {
 			auto path = std::filesystem::u8path(output);
-			std::fstream fs(path, std::ios::out | std::ios::binary | std::ios::trunc);
-			if (fs.fail()) {
-				throw std::runtime_error("output file open error.");
-			}
-			fs.write(reinterpret_cast<const char* const>(fileImage.data()), fileImage.size());
-
-		} catch (const sequencer::MmlCompiler::Exception& e) {
-			const size_t lineNumber = [&] {		// 行番号取得
-				static const std::regex re(R"(\r\n|\n|\r)");
-				auto i = std::sregex_iterator(mml.cbegin(), e.it, re);
-				size_t lf = std::distance(i, std::sregex_iterator()); // 改行の数
-				return lf + 1;
-			}();
-			const auto msg = sequencer::MmlCompiler::Exception::getMessage(e.code);	// エラーメッセージ取得
-			auto errorWord = [&] {
-				std::string s(e.errorWord);
-				std::smatch m;
-				if (std::regex_search(s, m, std::regex(R"(\r\n|\n|\r)"))) {
-					s = std::string(s.cbegin(), m[0].first);
-				}
-				return s;
-			}();
-
-			const auto s = string::format(R"(line %d %s : %s)", lineNumber, errorWord, msg);
-			throw std::runtime_error(s);
+			std::ofstream fs(path, std::ios::out | std::ios::binary | std::ios::trunc);
+			if (fs.fail()) throw std::runtime_error("output file open error.");
+			fs.write(reinterpret_cast<const char*>(fileImage.data()), fileImage.size());
+		} else {
+			std::cout.write(reinterpret_cast<const char*>(fileImage.data()), fileImage.size());	// stdout
 		}
 
 	} catch (std::exception& e) {
 		std::cerr << e.what() << std::endl;
+		return 1;
+	} catch (...) {
+		std::cerr << "unknown exception" << std::endl;
 		return 1;
 	}
 

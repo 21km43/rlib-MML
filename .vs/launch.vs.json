@@ -11,7 +11,8 @@
       "debuggerConfiguration": "gdb",
       "args": [
         "-i../../../test.mml",
-        "-o../../../out.mid"
+        "-o../../../out.mid",
+        "--format=json"
       ],
       "env": {}
     },
