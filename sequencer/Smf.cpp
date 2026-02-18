@@ -14,8 +14,7 @@
 using namespace rlib;
 using namespace rlib::midi;
 
-class Smf::Inner {
-public:
+namespace {
 #pragma pack( push )
 #pragma pack( 1 )
 
@@ -39,15 +38,41 @@ public:
 		std::reverse(reinterpret_cast<uint8_t*>(&t), reinterpret_cast<uint8_t*>(&t) + sizeof(t));
 	}
 
-	template <typename T> static T read(std::istream& is) {
-		typename std::remove_const<T>::type buf;
-		if (is.read(reinterpret_cast<char*>(&buf), sizeof(buf)).gcount() < sizeof(buf)) {
-			throw std::runtime_error("size error");
+	class Read {
+		size_t m_readBytes = 0;
+	public:
+		std::istream& is;
+		Read(std::istream& is_)
+			:is(is_) {
 		}
-		return buf;
-	}
+		const size_t readBytes()const {
+			return m_readBytes;
+		}
+		template <typename T> T read() {
+			typename std::remove_const<T>::type buf;
+			if (is.read(reinterpret_cast<char*>(&buf), sizeof(buf)).gcount() < sizeof(buf)) {
+				throw std::runtime_error("size error");
+			}
+			m_readBytes += sizeof(buf);
+			return buf;
+		}
 
+		std::vector<uint8_t> read(size_t bytes) {
+			std::vector<uint8_t> buf(bytes);
+			const auto readed = is.read(reinterpret_cast<char*>(buf.data()), buf.size()).gcount();
+			m_readBytes += readed;
+			buf.resize(readed);
+			return buf;
+		}
+
+		void unget() {
+			if (!is.unget()) throw std::runtime_error("unget error");	// 1Byte戻す
+			m_readBytes--;
+		}
+
+	};
 };
+
 
 std::vector<uint8_t> Smf::getFileImage() const
 {
@@ -93,9 +118,9 @@ std::vector<uint8_t> Smf::getFileImage() const
 		}();
 
 		{// TrackChunk を先頭に挿入
-			Inner::TrackChunk trackChunk;
+			TrackChunk trackChunk;
 			trackChunk.dataLength = static_cast<uint32_t>(v.size());
-			Inner::changeEndian(trackChunk.dataLength);
+			changeEndian(trackChunk.dataLength);
 			v.insert(v.begin(),
 				reinterpret_cast<const uint8_t*>(&trackChunk),
 				reinterpret_cast<const uint8_t*>(&trackChunk) + sizeof(trackChunk));
@@ -104,16 +129,16 @@ std::vector<uint8_t> Smf::getFileImage() const
 		trackData.emplace_back(std::move(v));
 	}
 
-	const Inner::HeaderChunk headerChunk = [&] {
-		Inner::HeaderChunk h;
+	const HeaderChunk headerChunk = [&] {
+		HeaderChunk h;
 		h.trackCount = static_cast<uint16_t>(trackData.size());
 		h.format = h.trackCount > 1 ? 1 : 0;
 		h.division = timeBase;
 		// エンディアン変更
-		Inner::changeEndian(h.dataLength);
-		Inner::changeEndian(h.format);
-		Inner::changeEndian(h.trackCount);
-		Inner::changeEndian(h.division);
+		changeEndian(h.dataLength);
+		changeEndian(h.format);
+		changeEndian(h.trackCount);
+		changeEndian(h.division);
 		return h;
 	}();
 
@@ -133,16 +158,17 @@ Smf Smf::fromStream(std::istream& is)
 	using namespace midi;
 
 	Smf smf;
+	Read r(is);
 
-	const auto headerChunk = [&is]() {
-		Inner::HeaderChunk c = Inner::read<decltype(c)>(is);
-		if (c.MThd != Inner::HeaderChunk().MThd) {
+	const auto headerChunk = [&r]() {
+		HeaderChunk c = r.read<decltype(c)>();
+		if (c.MThd != HeaderChunk().MThd) {
 			throw std::runtime_error("MThd chunk error");
 		}
-		Inner::changeEndian(c.dataLength);
-		Inner::changeEndian(c.format);
-		Inner::changeEndian(c.trackCount);
-		Inner::changeEndian(c.division);
+		changeEndian(c.dataLength);
+		changeEndian(c.format);
+		changeEndian(c.trackCount);
+		changeEndian(c.division);
 		return c;
 	}();
 
@@ -152,12 +178,12 @@ Smf Smf::fromStream(std::istream& is)
 	std::exception_ptr ep;	// 例外保持
 	try {
 		for (size_t i = 0; i < headerChunk.trackCount; i++) {
-			const auto trackChunk = [&is]() {
-				Inner::TrackChunk c = Inner::read<decltype(c)>(is);
-				if (c.MTrk != Inner::TrackChunk().MTrk) {
+			const auto trackChunk = [&r]() {
+				TrackChunk c = r.read<decltype(c)>();
+				if (c.MTrk != TrackChunk().MTrk) {
 					throw std::runtime_error("MTrk chunk error.");
 				}
-				Inner::changeEndian(c.dataLength);
+				changeEndian(c.dataLength);
 				return c;
 			}();
 
@@ -165,18 +191,18 @@ Smf Smf::fromStream(std::istream& is)
 			try{
 				std::uint64_t currentPosition = 0;		// 現在位置
 				uint8_t beforeStatus = 0;
-				for (const auto beginPosition = is.tellg(); is.tellg() - beginPosition < trackChunk.dataLength; ) {
-					auto readVariableValue = [&is] {					// 可変長数値を取得
-						return inner::readVariableValue([&] {return Inner::read<uint8_t>(is); });
+				for (const auto beginPosition = r.readBytes(); r.readBytes() < beginPosition + trackChunk.dataLength; ) {
+					auto readVariableValue = [&r] {					// 可変長数値を取得
+						return inner::readVariableValue([&] {return r.read<uint8_t>(); });
 					};
 
 					currentPosition += readVariableValue();		// 現在位置 += デルタタイム
 
 					// status 読み込み
 					const auto status = [&] {
-						const uint8_t status = Inner::read<decltype(status)>(is);
+						const uint8_t status = r.read<decltype(status)>();
 						if (!(status & 0x80)) {					// status 省略なら直前値を採用
-							is.seekg(-1, std::ios::cur);		// 位置を戻す
+							r.unget();							// 1Byte戻す
 							return beforeStatus;
 						}
 						beforeStatus = status;
@@ -185,38 +211,38 @@ Smf Smf::fromStream(std::istream& is)
 
 					switch (status & 0xf0) {
 					case EventNoteOff::statusByte: {
-						const std::array<uint8_t, 2> a = Inner::read<decltype(a)>(is);
+						const std::array<uint8_t, 2> a = r.read<decltype(a)>();
 						track.events.emplace(currentPosition, std::make_shared<EventNoteOff>(status & 0xf, a[0] & 0x7f, a[1] & 0x7f));
 						break;
 					}
 					case EventNoteOn::statusByte: {
-						const std::array<uint8_t, 2> a = Inner::read<decltype(a)>(is);
+						const std::array<uint8_t, 2> a = r.read<decltype(a)>();
 						track.events.emplace(currentPosition, std::make_shared<EventNoteOn>(status & 0xf, a[0] & 0x7f, a[1] & 0x7f));
 						break;
 					}
 					case EventPolyphonicKeyPressure::statusByte: {
-						const std::array<uint8_t, 2> a = Inner::read<decltype(a)>(is);
+						const std::array<uint8_t, 2> a = r.read<decltype(a)>();
 						track.events.emplace(currentPosition, std::make_shared<EventPolyphonicKeyPressure>(status & 0xf, a[0] & 0x7f, a[1] & 0x7f));
 						break;
 					}
 					case EventControlChange::statusByte: {
-						const std::array<uint8_t, 2> a = Inner::read<decltype(a)>(is);
+						const std::array<uint8_t, 2> a = r.read<decltype(a)>();
 						track.events.emplace(currentPosition, std::make_shared<EventControlChange>(status & 0xf, a[0] & 0x7f, a[1] & 0x7f));
 						break;
 					}
 					case EventProgramChange::statusByte: {
-						const uint8_t n = Inner::read<decltype(n)>(is);
+						const uint8_t n = r.read<decltype(n)>();
 						track.events.emplace(currentPosition, std::make_shared<EventProgramChange>(status & 0xf, n & 0x7f));
 						break;
 					}
 					case EventPitchBend::statusByte: {
-						const std::array<uint8_t, 2> a = Inner::read<decltype(a)>(is);
+						const std::array<uint8_t, 2> a = r.read<decltype(a)>();
 						const auto n = ((a[0] & 0x7f) + (a[1] & 0x7f) * 0x80) - 8192;
 						track.events.emplace(currentPosition, std::make_shared<EventPitchBend>(status & 0xf, n));
 						break;
 					}
 					case EventChannelPressure::statusByte: {
-						const uint8_t n = Inner::read<decltype(n)>(is);
+						const uint8_t n = r.read<decltype(n)>();
 						track.events.emplace(currentPosition, std::make_shared<EventChannelPressure>(status & 0xf, n & 0x7f));
 						break;
 					}
@@ -226,7 +252,7 @@ Smf Smf::fromStream(std::istream& is)
 							const auto size = readVariableValue();		// データ長
 							std::vector<uint8_t> data;
 							for (auto i = 0; i < size; i++) {
-								const uint8_t n = Inner::read<decltype(n)>(is);
+								const uint8_t n = r.read<decltype(n)>();
 								if (n == 0xf7) {				// EOX(終了コード)
 									if (i != size - 1) {
 										// ヘンなところで終わった(が、エラーにはせず続行)
@@ -246,13 +272,11 @@ Smf Smf::fromStream(std::istream& is)
 							break;
 						}
 						case EventMeta::statusByte: {
-							const uint8_t type = Inner::read<decltype(type)>(is);					// イベントタイプ
-							const auto len = readVariableValue();									// データ長
-							std::vector<uint8_t> data(len);
-							if (const auto readed = is.read(reinterpret_cast<char*>(data.data()), data.size()).gcount(); readed < static_cast<std::intmax_t>(data.size())) {
-								data.resize(readed);
-								// データが足りない(が、エラーにはせず続行)
-								std::clog << "[warning] meta data size error." << std::endl;
+							const uint8_t type = r.read<decltype(type)>();						// イベントタイプ
+							const auto len = readVariableValue();								// データ長
+							auto data = r.read(len);
+							if (data.size() < len) {
+								std::clog << "[warning] meta data size error." << std::endl;	// データが足りない(が、エラーにはせず続行)
 							}
 							track.events.emplace(currentPosition, std::make_shared<EventMeta>(static_cast<EventMeta::Type>(type), std::move(data)));
 							break;
