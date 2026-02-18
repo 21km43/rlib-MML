@@ -10,7 +10,6 @@
 namespace rlib::midi {
 
 	class Smf {
-		class Inner;
 	public:
 		struct Event {
 			const uint64_t								position;
