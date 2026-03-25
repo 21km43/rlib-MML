@@ -4,7 +4,7 @@
 
 ## Description
 
-A class library that compiles (converts) MML into standard MIDI files. Implementation in C++17.
+A class library that compiles (converts) MML into standard MIDI files. Implementation in C++20.
 - It is in a form that can be built as a command line application.
 - The MML grammar does not have a fixed standard, but it is implemented to follow something like an implicit standard.
 
@@ -16,12 +16,12 @@ It summarizes the process from MML creation to playback on the browser.
 
 ## Requirement
 
-It can be compiled in a C++17 environment. The build requires boost.
+It can be compiled in a C++20 environment. The build requires boost.
 
 We have confirmed the operation in the following environment.
 
 - linux g++
-- windows VisualStudio 2019,2022
+- windows VisualStudio 2019,2022,2026
 
 ### WebAssembly
 
@@ -61,12 +61,15 @@ Experimental WebAssembly support is also available.
 | ---- | ---- | ---- |
 |CreatePort(<br>&emsp;name:[port name],<br>&emsp;instrument:[instrument name]\(optional),<br>&emsp;channel:[channel number],<br>)| Define (declare) the port<br>Channel numbers are 1-16.|"createPort(name:Piano, channel:3)" <br>→ Declare the port of MIDI channel 3 with the name "Piano".<br>instrument specifies the name of the instrument. If omitted, the default instrument is used.|
 |Port([port name])| It is port switching|"port(Piano) cde"  → CDE at Port "Piano"|
-|V([volume value])<br>ailias: volume|The volume. Values ​​are 0-127.| "V(120) cde"  → CDE at Volume 120.|
-|Pan([pan value])<br>ailias: panpot|It is pan (panpot).<br>Values ​​range from 0 (far left) to 127 (far right), with 64 in the center.| "pan(0) cde"  → CDE at Pan 0 (far left).|
+|V([volume value])<br>ailias: Volume|The Volume. Values ​​are 0-127.<br>If you include a sign, the value is specified relative to the current value.|"V(120) cde V(-30) fga"<br>→ volume 120 it's CDE, volume 90 it's fga|
+|Ep([value])<br>別名 Expression|The Expression. Values ​​are 0-127.<br>If you include a sign, the value is specified relative to the current value.| "Ep(120) cde Ep(-30) fga"<br>→ expression 120 it's CDE, expression 90 it's fga|
+|Pan([pan value])<br>ailias: Panpot|It is pan (panpot).<br>Values ​​range from 0 (far left) to 127 (far right), with 64 in the center.| "pan(0) cde"  → CDE at Pan 0 (far left).|
 |PitchBend([value])| Pitch bend.<br>Values range from -8192 (two notes down) to 8191 (two notes up), with the centre at 0.| "PitchBend(-4096) cde Pan(0) cde"<br>→ CDE lowered by a semitone and normal CDE.|
 |CC([contorl change no],[value])<br>ailias: ContorlChange| Contorl change.<br>The first argument is the control number and the first argument is the value| "CC(0,10)CC(32,130)@2" Bank-selected programme change.|
 |CreateSequence(<br>&emsp;name:[sequence name],<br>&emsp;mml:[MML],<br>)|Defined Sequence(sub Sequence).<br>Define songs (MML) as parts and call them in subsequent MMLs.| // Defined rhythm pattern<br/>CreateSequence(name:drum, mml:"<br/>&emsp;CreatePort(name:kick, channel:10) l8 o1 c^^c ^c^^<br/>&emsp;CreatePort(name:snare, channel:10) l8 o1 ^^d^ ^^d^<br/>")|
 |Seq(<br>&emsp;[sequence name],<br>&emsp;length:[length(optional)]<br>)<br>ailias Sequence|Calls a predefined sequence (sub-sequence).| // Defined rhythmic pattern is repeated three times.<br>// Only half-note minutes are used for the third round of the sequence.<br/>Seq(drum) Seq(drum) Seq(drum,length:"2")|
+|MasterVolume([値])|The Master Volume. Values ​​are 0-16383.<br>This is an alias for the GM Master Volume in System Exclusive.|<br/>"MasterVolume(10000)"<br>→ Master Volume 10000|
+|SysEx(<br>&emsp;[data]...<br>)<br>|It is SystemExclusive<br>Specify data with a variable-length argument with no name.<br>Specify either 0xf0 or 0xf7 as the first byte, and (generally) 0xf7 as the last byte.| // Reset Roland GS （GS Reset）<br/>SysEx(0xf0,0x41,0x10,0x42,0x12,0x40,0x00,0x7f,0x00,0x41,0xf7)|
 |Meta(<br>&emsp;type:[event type],<br>&emsp;[data]...<br>)|Meta Event.<br>type specifies the event type.<br>Specify data with a variable-length argument with no name. It is not necessary to describe the data length.| // title info<br/>Meta(type:0x1,"The Lost King's Scepter")<br>// SMPTE offset<br>Meta(type:0x54,96,0,0,0,0)|
 |DefinePresetFM(<br>&emsp;no:[program no],<br>&emsp;name:[name],<br>&emsp;[data]...<br>)|Sequencer specific meta event that defines FM sound tone in rlib-MML.|DefinePresetFM(no:4,name:"piano",<br>// AR  DR  SR  RR  SL  TL KS  ML DT<br>   29,  8,  0,  8,  3, 31, 2,  1, 3,<br>   31,  3,  1,  6, 10,  0, 0,  2, 7,<br>   29, 20,  0,  9,  2, 44, 0,  4, 2,<br>   31,  7,  2,  6,  6,  0, 0,  1, 5,<br>// AL  FB<br>    4,  7,<br>)|
 ## string

@@ -21,6 +21,13 @@ namespace rlib::sequencer {
 			}
 		};
 
+		struct EventSystemExclusive : public Event {
+			std::vector<uint8_t>	data;
+			virtual std::shared_ptr<Event> clone()const {
+				return std::make_shared<EventSystemExclusive>(*this);
+			}
+		};
+
 		struct EventMeta : public Event {
 			uint8_t type = 0;
 			std::string	data;
@@ -41,6 +48,14 @@ namespace rlib::sequencer {
 				return std::make_shared<EventVolume>(*this);
 			}
 		};
+
+		struct EventExpression : public Event {
+			uint8_t	expression = 0;			// 値 0～127
+			virtual std::shared_ptr<Event> clone()const {
+				return std::make_shared<EventExpression>(*this);
+			}
+		};
+
 		struct EventPan : public Event {
 			uint8_t	pan = 0;			// パン値 0～127
 			virtual std::shared_ptr<Event> clone()const {
@@ -126,10 +141,17 @@ namespace rlib::sequencer {
 			sequenceLengthError,			// Sequence コマンドの length 指定に誤りがあります
 			metaError,						// Meta コマンドに誤りがあります
 			metaTypeError,					// Meta コマンドの type の指定に誤りがあります
+			sysExError,						// SysEx コマンドに誤りがあります
+			sysExArgError,					// SysEx コマンドの引数に誤りがあります
+			sysExArgFirstError,				// SysEx コマンドの先頭バイトは 0xf0 か 0xf7 を指定してください
 			fineTuneError,					// FineTune コマンドに誤りがあります
 			fineTuneRangeError,				// FineTune コマンドの値が範囲外です
 			coarseTuneError,				// CoarseTune コマンドに誤りがあります
 			coarseTuneRangeError,			// CoarseTune コマンドの値が範囲外です
+			masterVolumeError,				// MasterVolume コマンドに誤りがあります
+			masterVolumeRangeError,			// MasterVolume コマンドの値が範囲外です
+			expressionError,				// Expression コマンドに誤りがあります
+			expressionRangeError,			// Expression コマンドの値が範囲外です
 			definePresetFMError,			// DefinePresetFM コマンドに誤りがあります
 			definePresetFMNoError,			// DefinePresetFM コマンドのプログラムナンバー指定に誤りがあります
 			definePresetFMRangeError,		// DefinePresetFM コマンドの値が範囲外です
@@ -141,9 +163,8 @@ namespace rlib::sequencer {
 		struct Result {
 			std::vector<Port>	ports;
 			struct Error {
-				ErrorCode					code;
-				std::string::const_iterator	it;
-				size_t 						length;
+				ErrorCode			code;
+				std::string_view	text;
 			};
 			std::vector<Error>	errors;
 			bool hasError() const { return errors.size() > 0; };
@@ -162,15 +183,15 @@ namespace rlib::sequencer {
 				std::intmax_t,		// 符号付数値
 				std::uintmax_t,		// 符号ナシ数値 ( +○○ と記述されてた場合は intmax_t )
 				double,				// 浮動小数点数
-				std::pair<std::string::const_iterator, std::string::const_iterator>	// 文字列
+				std::string_view	// 文字列
 			>;
 
 			// 単語解析
 			struct ParsedWord {
-				std::optional<Word>	word;		// nullならエラー
-				std::string::const_iterator	next;	// 次の位置
+				std::optional<Word>	word;	// nullならエラー
+				std::string_view	next;	// 次の位置
 			};
-			static std::optional<ParsedWord> parseWord(std::string::const_iterator iBegin, std::string::const_iterator iEnd);
+			static std::optional<ParsedWord> parseWord(const std::string_view& text);
 		};
 
 		static void unitTest();

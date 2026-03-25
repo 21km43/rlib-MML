@@ -17,8 +17,6 @@
 #include "../json/Json.h"
 
 
-
-
 namespace rlib::sequencer {
 
 	inline std::string smfToMml(const midi::Smf& smf) {
@@ -27,27 +25,27 @@ namespace rlib::sequencer {
 		// 文字列を必要に応じて " " や R"( )" で括る 
 		const auto safeText = [](const std::string& text) {
 			const auto isValidName = [](const std::string& s) {
-				auto r = MmlCompiler::Util::parseWord(s.begin(), s.end());
+				auto r = MmlCompiler::Util::parseWord(s);
 				if (r && r->word) {
-					if (std::holds_alternative<std::pair<std::string::const_iterator, std::string::const_iterator>>(*r->word)) {
-						return r->next == s.end();
+					if (std::holds_alternative<std::string_view>(*r->word)) {
+						return r->next.empty();
 					}
 				}
 				return false;
 			};
 			if (isValidName(text)) return text;
-			if (auto t = string::format(u8R"("%s")", text); isValidName(t)) {	// ダメなら " " で括る
+			if (auto t = string::format(R"("%s")", text); isValidName(t)) {	// ダメなら " " で括る
 				return t;
 			}
-			if (auto t = string::format(u8R"_(R"(%s)")_", text); isValidName(t)) {	// ダメなら R"( )" で括る
+			if (auto t = string::format(R"_(R"(%s)")_", text); isValidName(t)) {	// ダメなら R"( )" で括る
 				return t;
 			}
 			for (int i = 0; i < 1000; i++) {
-				if (auto t = string::format(u8R"(R"t%d(%s)t%d")", i, text, i); isValidName(t)) {	// それでもダメなら R"t?(○○)t?" で括る
+				if (auto t = string::format(R"(R"t%d(%s)t%d")", i, text, i); isValidName(t)) {	// それでもダメなら R"t?(○○)t?" で括る
 					return t;
 				}
 			}
-			return string::format(u8R"(R"t_(%s)t_")", text);	// 最後は R"t_(○○)t_" で諦める
+			return string::format(R"(R"t_(%s)t_")", text);	// 最後は R"t_(○○)t_" で諦める
 		};
 
 		const auto decodeText = [](const std::string& bin)->std::optional<std::string> {
@@ -160,7 +158,7 @@ namespace rlib::sequencer {
 							add("1", 1920);
 							return;
 						}
-						add(string::format(u8"!%d", targetLen));
+						add(string::format("!%d", targetLen));
 					};
 
 					if (auto mod = current % 240) {	// 区切り位置の余り
@@ -186,7 +184,7 @@ namespace rlib::sequencer {
 					// velocity
 					if (state.velocity != e.velocity) {
 						state.velocity = e.velocity;
-						r += string::format(u8"v%d", state.velocity);
+						r += string::format("v%d", state.velocity);
 					}
 
 					// ノートオフか？
@@ -217,7 +215,7 @@ namespace rlib::sequencer {
 					const int oct = e.note / static_cast<int>(noteTable.size());
 
 					if (state.note < 0) {
-						r += string::format(u8" o%d ", oct - 2);
+						r += string::format(" o%d ", oct - 2);
 						state.note = e.note;
 					}
 
@@ -225,7 +223,7 @@ namespace rlib::sequencer {
 					for (int i = 0; i < std::abs(diffOct); i++) {
 						r += diffOct > 0 ? "<" : ">";
 					}
-					r += string::format(u8"%s", note);
+					r += string::format("%s", note);
 					state.note = e.note;
 
 					// ノートオフより先のイベントがあるか？(重なるか？)
@@ -273,32 +271,71 @@ namespace rlib::sequencer {
 					auto& e = static_cast<const midi::EventControlChange&>(*it->event);
 					switch (e.type) {
 					case midi::EventControlChange::Type::volume:
-						*mmls.rbegin() += string::format(u8"V(%s)", static_cast<int>(e.value));
+						*mmls.rbegin() += string::format("V(%s)", static_cast<int>(e.value));
+						break;
+					case midi::EventControlChange::Type::expression:
+						*mmls.rbegin() += string::format("Ep(%s)", static_cast<int>(e.value));
 						break;
 					case midi::EventControlChange::Type::pan:
-						*mmls.rbegin() += string::format(u8"Pan(%s)", static_cast<int>(e.value));
+						*mmls.rbegin() += string::format("Pan(%s)", static_cast<int>(e.value));
 						break;
 					default:
-						*mmls.rbegin() += string::format(u8"CC(%s,%s)", static_cast<int>(e.type), static_cast<int>(e.value));
+						*mmls.rbegin() += string::format("CC(%s,%s)", static_cast<int>(e.type), static_cast<int>(e.value));
 						break;
 					}
 				}},
 
 				{typeid(midi::EventProgramChange), [&](const Smf::Events::iterator& it) {
 					auto& e = static_cast<const midi::EventProgramChange&>(*it->event);
-					*mmls.rbegin() += string::format(u8"@%d", static_cast<int>(e.programNo));
+					*mmls.rbegin() += string::format("@%d", static_cast<int>(e.programNo));
 				}},
 
 				{typeid(midi::EventPitchBend), [&](const Smf::Events::iterator& it) {
 					auto& e = static_cast<const midi::EventPitchBend&>(*it->event);
-					*mmls.rbegin() += string::format(u8"PitchBend(%d)", static_cast<int>(e.pitchBend));
+					*mmls.rbegin() += string::format("PitchBend(%d)", static_cast<int>(e.pitchBend));
 				}},
+
+				{ typeid(midi::EventSystemExclusive), [&](const Smf::Events::iterator& it) {
+					auto& e = static_cast<const midi::EventSystemExclusive&>(*it->event);
+
+					auto isMatch = [](const std::vector<uint8_t>& data, const std::initializer_list<int16_t>& pattern) {
+						if (data.size() < pattern.size()) return false;
+						auto it = data.begin();
+						for (auto p : pattern) {
+							if (p >= 0 && *it != p) return false;	// 0未満はワイルドカード
+							it++;
+						}
+						return true;
+					};
+
+					// マスターボリューム(deviceId=0x7f のみ)
+					if (isMatch(e.data, { 0xf0, 0x7f, 0x7f, 0x4, 0x1, -1, -1 })) {
+						midi::utility::Bit14 u;
+						u.lsb = e.data[5];
+						u.msb = e.data[6];
+						*mmls.rbegin() += string::format("\nMasterVolume(%d)", u.value);
+						return;
+					}
+
+					// その他
+					const auto join = [](const std::vector<uint8_t>& v, const std::string& sep)->std::string {
+						std::ostringstream oss;
+						for (size_t i = 0; i < v.size(); i++) {
+							if (i > 0) oss << sep;
+							oss << std::format("0x{:02x}", v[i]);
+						}
+						return oss.str();
+					};
+
+					*mmls.rbegin() += string::format("\nSysEx(%s)", join(e.data, ","));
+
+				} },
 
 				{typeid(midi::EventMeta), [&](const Smf::Events::iterator& it) {
 					auto& e = static_cast<const midi::EventMeta&>(*it->event);
 					switch (e.type) {
 					case midi::EventMeta::Type::tempo:
-						*mmls.rbegin() += string::format(u8"t%s", e.getTempo());
+						*mmls.rbegin() += string::format("t%s", e.getTempo());
 						return;
 					case midi::EventMeta::Type::sequencerLocal:
 						try {
@@ -311,14 +348,14 @@ namespace rlib::sequencer {
 										const auto& name = it.second["name"].get<std::string>();
 										const auto& data = it.second["reg"].get<Json::Array>();
 										*mmls.rbegin() += string::format(
-											u8"\nDefinePresetFM(no:%d, name:%s,\n"
-											u8"// AR  DR  SR  RR  SL  TL KS ML DT\n"
-											u8"  %3d,%3d,%3d,%3d,%3d,%3d,%2d,%2d,%2d,\n"
-											u8"  %3d,%3d,%3d,%3d,%3d,%3d,%2d,%2d,%2d,\n"
-											u8"  %3d,%3d,%3d,%3d,%3d,%3d,%2d,%2d,%2d,\n"
-											u8"  %3d,%3d,%3d,%3d,%3d,%3d,%2d,%2d,%2d,\n"
-											u8"// AL  FB\n"
-											u8"  %3d,%3d)\n"
+											"\nDefinePresetFM(no:%d, name:%s,\n"
+											"// AR  DR  SR  RR  SL  TL KS ML DT\n"
+											"  %3d,%3d,%3d,%3d,%3d,%3d,%2d,%2d,%2d,\n"
+											"  %3d,%3d,%3d,%3d,%3d,%3d,%2d,%2d,%2d,\n"
+											"  %3d,%3d,%3d,%3d,%3d,%3d,%2d,%2d,%2d,\n"
+											"  %3d,%3d,%3d,%3d,%3d,%3d,%2d,%2d,%2d,\n"
+											"// AL  FB\n"
+											"  %3d,%3d)\n"
 											, no, safeText(name), data);
 									}
 								}
@@ -336,7 +373,7 @@ namespace rlib::sequencer {
 					case midi::EventMeta::Type::words:
 						if (auto text = decodeText(e.getText())) {		// 文字列？
 							const auto s = safeText(*text);			// 必要に応じて " で括る
-							*mmls.rbegin() += string::format(u8"\nMeta(type:0x%x,%s)", static_cast<unsigned int>(e.type), s);
+							*mmls.rbegin() += string::format("\nMeta(type:0x%x,%s)", static_cast<unsigned int>(e.type), s);
 							return;
 						}
 						break;
@@ -351,7 +388,7 @@ namespace rlib::sequencer {
 						}
 						return oss.str();
 					};
-					*mmls.rbegin() += string::format(u8"\nMeta(type:0x%x%s)", static_cast<unsigned int>(e.type), toJoinString(e.data));
+					*mmls.rbegin() += string::format("\nMeta(type:0x%x%s)", static_cast<unsigned int>(e.type), toJoinString(e.data));
 				}},
 			};
 
@@ -360,7 +397,7 @@ namespace rlib::sequencer {
 				// delta time (休符)
 				if (const size_t len = it->position - state.position; len > 0) {
 					auto vLen = getLengthText(len, state.position, true);
-					*mmls.rbegin() += string::format(u8"r%s", vLen[0]);
+					*mmls.rbegin() += string::format("r%s", vLen[0]);
 					for (auto i = 1; i < vLen.size(); i++) {
 						mmls.emplace_back(std::move(vLen[i]));
 					}
@@ -374,10 +411,10 @@ namespace rlib::sequencer {
 
 			std::string result;
 
-			const auto instrumentText = instrument.empty() ? "" : string::format(u8"instrument:%s, ", instrument);
-			result += string::format(u8"\nCreatePort(name:%s, %schannel:%d)", name, instrumentText, channel + 1, channel + 1);
-			result += string::format(u8"\nPort(%s)", name, channel + 1);
-			result += string::format(u8" l8 ");
+			const auto instrumentText = instrument.empty() ? "" : string::format("instrument:%s, ", instrument);
+			result += string::format("\nCreatePort(name:%s, %schannel:%d)", name, instrumentText, channel + 1, channel + 1);
+			result += string::format("\nPort(%s)", name, channel + 1);
+			result += string::format(" l8 ");
 
 			for (const auto& mml : mmls) {
 				result += mml + "\n";
@@ -450,7 +487,7 @@ namespace rlib::sequencer {
 							resultMapTrack[trackKey][metaChannel].insert(event);
 							break;
 						}
-					} else if (auto e = std::dynamic_pointer_cast<const midi::EventExclusive>(event.event)) {
+					} else if (auto e = std::dynamic_pointer_cast<const midi::EventSystemExclusive>(event.event)) {
 						resultMapTrack[trackKey][metaChannel].insert(event);
 					} else {
 						assert(false);
@@ -488,7 +525,7 @@ namespace rlib::sequencer {
 			}();
 			for (auto& iMapEvents : iMapTrack.second) {
 				const int channel = iMapEvents.first;
-				const auto needChannelName = iMapTrack.second.size() > 1;	// 名前に Cannel を含める必要アリ（含めないと重複する）
+				const auto needChannelName = iMapTrack.second.size() > 1;	// 名前に Channel を含める必要アリ（含めないと重複する）
 
 				const auto trackName = [&] {
 					std::string s(sequenceName);

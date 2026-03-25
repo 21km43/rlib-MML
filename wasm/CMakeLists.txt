@@ -11,7 +11,7 @@ endif()
 
 project ("rlibmml")
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 
 # ソースをこのプロジェクトの実行可能ファイルに追加します。
 add_executable ( ${CMAKE_PROJECT_NAME}

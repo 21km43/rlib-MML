@@ -44,6 +44,10 @@ namespace rlib::sequencer {
 						auto& e = static_cast<const MmlCompiler::EventVolume&>(event);
 						track.events.insert(Smf::Event(e.position, std::make_shared<midi::EventControlChange>(port.channel, midi::EventControlChange::Type::volume, e.volume)));
 					}},
+					{typeid(MmlCompiler::EventExpression), [](Smf::Track& track,const MmlCompiler::Port& port,const MmlCompiler::Event& event) {
+						auto& e = static_cast<const MmlCompiler::EventExpression&>(event);
+						track.events.insert(Smf::Event(e.position, std::make_shared<midi::EventControlChange>(port.channel, midi::EventControlChange::Type::expression, e.expression)));
+					}},
 					{typeid(MmlCompiler::EventPan), [](Smf::Track& track,const MmlCompiler::Port& port,const MmlCompiler::Event& event) {
 						auto& e = static_cast<const MmlCompiler::EventPan&>(event);
 						track.events.insert(Smf::Event(e.position, std::make_shared<midi::EventControlChange>(port.channel, midi::EventControlChange::Type::pan, e.pan)));
@@ -63,6 +67,10 @@ namespace rlib::sequencer {
 					{typeid(MmlCompiler::EventMeta), [](Smf::Track& track,const MmlCompiler::Port& port,const MmlCompiler::Event& event) {
 						auto& e = static_cast<const MmlCompiler::EventMeta&>(event);
 						track.events.insert(Smf::Event(e.position, std::make_shared<midi::EventMeta>(midi::EventMeta::createText(static_cast<midi::EventMeta::Type>(e.type), e.data))));
+					}},
+					{typeid(MmlCompiler::EventSystemExclusive), [](Smf::Track& track,const MmlCompiler::Port& port,const MmlCompiler::Event& event) {
+						auto& e = static_cast<const MmlCompiler::EventSystemExclusive&>(event);
+						track.events.insert(Smf::Event(e.position, std::make_shared<midi::EventSystemExclusive>(e.data)));
 					}},
 				};
 				const auto& ev = *event;

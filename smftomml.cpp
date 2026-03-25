@@ -29,7 +29,7 @@ int main(const int argc, const char* const argv[])
 		po::store(po::command_line_parser(argc, argv).options(desc).positional(pd).run(), vm);
 
 		if (vm.count("version")) {
-			std::cout << "smftomml version 1.2.2" << std::endl;
+			std::cout << "smftomml version 1.2.3" << std::endl;
 			return 0;
 		}
 
@@ -41,7 +41,7 @@ int main(const int argc, const char* const argv[])
 		po::notify(vm);
 
 		auto fs = [&] {
-			auto path = std::filesystem::u8path(input);
+			auto path = std::filesystem::path(input);
 			std::fstream fs(path, std::ios::in | std::ios::binary);
 			if (fs.fail()) {
 				throw std::runtime_error("input file open error.");
@@ -53,7 +53,7 @@ int main(const int argc, const char* const argv[])
 			auto smf = midi::Smf::fromStream(fs);
 			const std::string mml = sequencer::smfToMml(smf);
 
-			auto path = std::filesystem::u8path(output);
+			auto path = std::filesystem::path(output);
 			std::fstream fs(path, std::ios::out | std::ios::binary | std::ios::trunc);
 			if (fs.fail()) {
 				throw std::runtime_error("output file open error.");

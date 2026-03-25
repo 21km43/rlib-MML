@@ -35,7 +35,7 @@ int main(const int argc, const char* const argv[])
 		po::store(po::command_line_parser(argc, argv).options(desc).positional(pd).run(), vm);
 
 		if (vm.count("version")) {
-			std::cout << "mmltosmf version 1.2.4" << std::endl;
+			std::cout << "mmltosmf version 1.2.5" << std::endl;
 			return 0;
 		}
 
@@ -48,7 +48,7 @@ int main(const int argc, const char* const argv[])
 
 		const std::string mml = [&] {
 			if (input != "-") {
-				auto path = std::filesystem::u8path(input);
+				auto path = std::filesystem::path(input);
 				std::ifstream fs(path, std::ios::in | std::ios::binary);
 				if (fs.fail()) throw std::runtime_error("input file open error.");
 				const std::istreambuf_iterator<char> begin(fs);
@@ -65,7 +65,7 @@ int main(const int argc, const char* const argv[])
 		}
 		const auto fileImage = r.smf.getFileImage();
 		if (output != "-") {
-			auto path = std::filesystem::u8path(output);
+			auto path = std::filesystem::path(output);
 			std::ofstream fs(path, std::ios::out | std::ios::binary | std::ios::trunc);
 			if (fs.fail()) throw std::runtime_error("output file open error.");
 			fs.write(reinterpret_cast<const char*>(fileImage.data()), fileImage.size());
