@@ -5,9 +5,8 @@ namespace rlib {
 	template <typename T = double> class TempoListT {
 	public:
 		using Type = T;
-		enum {
-			timeBase = 480,			// 分解能(4分音符あたりのカウント)
-		};
+		static constexpr int timeBase = 480;	// 分解能(4分音符あたりのカウント)
+
 		struct Element {
 			uint64_t	position = 0;	// 位置
 			T			tempo = 120.0;	// テンポ
@@ -116,7 +115,7 @@ namespace rlib {
 		}
 		// 1カウントあたりの時間(秒)取得
 		static T getSecPerCount(T tempo) {
-			return static_cast<T>(60.0) / (tempo * timeBase);
+			return static_cast<T>(60.0) / (tempo * static_cast<T>(timeBase));
 		}
 	private:
 

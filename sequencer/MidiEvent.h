@@ -6,7 +6,7 @@
 
 namespace rlib::midi {
 
-	namespace inner {
+	namespace utility {
 #pragma pack( push )
 #pragma pack( 1 )
 		union VariableValue {
@@ -38,6 +38,15 @@ namespace rlib::midi {
 				, flag(flag_)
 			{}
 		};
+
+		union Bit14 {
+			uint16_t value = 0;
+			struct {
+				uint16_t lsb : 7;
+				uint16_t msb : 7;
+				uint16_t dummy : 2;
+			};
+		}; 
 #pragma pack( pop )
 
 		// 可変長数値作成
@@ -58,7 +67,7 @@ namespace rlib::midi {
 
 		// 可変長数値から値を取得
 		static uint64_t readVariableValue(const std::function<uint8_t()>& fReadByte) {
-			inner::VariableValue vv;
+			utility::VariableValue vv;
 			for (size_t i = 0; i < 8; i++) {	// failsafe
 				const VariableByte vb(fReadByte());
 				vv.b7 = vv.b6;
@@ -78,7 +87,7 @@ namespace rlib::midi {
 
 	struct Event {
 		virtual ~Event() {}
-		virtual std::vector<uint8_t> midiMessage() const = 0;
+		virtual std::vector<uint8_t> smfBytes() const = 0;
 	};
 
 	struct EventCh : public Event {
@@ -103,7 +112,7 @@ namespace rlib::midi {
 		EventNoteOff(uint8_t channel, uint8_t note, uint8_t velocity)
 			:EventNote(channel, note, velocity)
 		{}
-		virtual std::vector<uint8_t> midiMessage() const {
+		virtual std::vector<uint8_t> smfBytes() const {
 			return std::vector<uint8_t>{static_cast<uint8_t>(statusByte | (channel & 0xf)), static_cast<uint8_t>(note & 0x7f), static_cast<uint8_t>(velocity & 0x7f)};
 		}
 	};
@@ -113,7 +122,7 @@ namespace rlib::midi {
 		EventNoteOn(uint8_t channel, uint8_t note, uint8_t velocity)
 			:EventNote(channel, note, velocity)
 		{}
-		virtual std::vector<uint8_t> midiMessage() const {
+		virtual std::vector<uint8_t> smfBytes() const {
 			return std::vector<uint8_t>{static_cast<uint8_t>(statusByte | (channel & 0xf)), static_cast<uint8_t>(note & 0x7f), static_cast<uint8_t>(velocity & 0x7f)};
 		}
 	};
@@ -125,7 +134,7 @@ namespace rlib::midi {
 		EventPolyphonicKeyPressure(uint8_t channel, uint8_t note_, uint8_t pressure_)
 			:EventCh(channel), note(note_), pressure(pressure_)
 		{}
-		virtual std::vector<uint8_t> midiMessage() const {
+		virtual std::vector<uint8_t> smfBytes() const {
 			return std::vector<uint8_t>{static_cast<uint8_t>(statusByte | (note & 0xf)), static_cast<uint8_t>(pressure & 0x7f)};
 		}
 	};
@@ -160,7 +169,7 @@ namespace rlib::midi {
 		EventControlChange(uint8_t channel, uint8_t type_, uint8_t value_)
 			:EventCh(channel), type(static_cast<Type>(type_)), value(value_)
 		{}
-		virtual std::vector<uint8_t> midiMessage() const {
+		virtual std::vector<uint8_t> smfBytes() const {
 			return std::vector<uint8_t>{static_cast<uint8_t>(statusByte | (channel & 0xf)), static_cast<uint8_t>(static_cast<uint8_t>(type) & 0x7f), static_cast<uint8_t>(value & 0x7f)};
 		}
 	};
@@ -171,7 +180,7 @@ namespace rlib::midi {
 		EventProgramChange(uint8_t channel, uint8_t programNo_)
 			:EventCh(channel), programNo(programNo_)
 		{}
-		virtual std::vector<uint8_t> midiMessage() const {
+		virtual std::vector<uint8_t> smfBytes() const {
 			return std::vector<uint8_t>{static_cast<uint8_t>(statusByte | (channel & 0xf)), static_cast<uint8_t>(programNo & 0x7f)};
 		}
 	};
@@ -182,7 +191,7 @@ namespace rlib::midi {
 		EventPitchBend(uint8_t channel, int16_t pitchBend_)
 			:EventCh(channel), pitchBend(pitchBend_)
 		{}
-		virtual std::vector<uint8_t> midiMessage() const {
+		virtual std::vector<uint8_t> smfBytes() const {
 			const int n = pitchBend + 8192;
 			return std::vector<uint8_t>{static_cast<uint8_t>(statusByte | (channel & 0xf)), static_cast<uint8_t>(n & 0x7f), static_cast<uint8_t>(n / 0x80 & 0x7f)};
 		}
@@ -194,22 +203,27 @@ namespace rlib::midi {
 		EventChannelPressure(uint8_t channel, uint8_t channelPressure_)
 			:EventCh(channel), channelPressure(channelPressure_)
 		{}
-		virtual std::vector<uint8_t> midiMessage() const {
+		virtual std::vector<uint8_t> smfBytes() const {
 			return std::vector<uint8_t>{static_cast<uint8_t>(statusByte | (channel & 0xf)), static_cast<uint8_t>(channelPressure & 0x7f)};
 		}
 	};
 
-	struct EventExclusive : public Event {
-		static constexpr uint8_t statusByte = 0xf0;
-		const std::vector<uint8_t>	data;
-		EventExclusive(std::vector<uint8_t>&& data_)
-			:Event(), data(std::move(data_))
-		{}
-		virtual std::vector<uint8_t> midiMessage() const {
-			std::vector<uint8_t> v;
-			v.push_back(statusByte);
-			v.insert(v.end(), data.begin(), data.end());
-			v.push_back(static_cast<unsigned char>(0xf7));			// 終了コード
+	struct EventSystemExclusive : public Event {
+		static constexpr uint8_t statusByteF0 = 0xf0;
+		static constexpr uint8_t statusByteF7 = 0xf7;
+		const std::vector<uint8_t>	data;		// データ(先頭バイトは0xf0|0xf7)、末尾のf7は必須ではない
+		EventSystemExclusive(const std::vector<uint8_t>& data_)
+			:Event(), data(data_)
+		{
+			assert(data.size() > 0 && (data[0] == statusByteF0 || data[0] == statusByteF7));
+		}
+		virtual std::vector<uint8_t> smfBytes() const {
+			std::vector<uint8_t> v{ data[0] };
+			{// データサイズ
+				std::vector<uint8_t> s = utility::getVariableValue(data.size() - 1);		// -1:statusByteは除く
+				v.insert(v.end(), std::make_move_iterator(s.begin()), std::make_move_iterator(s.end()));
+			}
+			v.insert(v.end(), data.begin() + 1, data.end());
 			return v;
 		}
 	};
@@ -242,13 +256,13 @@ namespace rlib::midi {
 			, data(std::move(data_))
 		{}
 
-		virtual std::vector<uint8_t> midiMessage() const {
+		virtual std::vector<uint8_t> smfBytes() const {
 			std::vector<uint8_t> v{
 				statusByte,
 				static_cast<uint8_t>(type),
 			};
 			{// データサイズ
-				std::vector<uint8_t> s = inner::getVariableValue(data.size());
+				std::vector<uint8_t> s = utility::getVariableValue(data.size());
 				v.insert(v.end(), std::make_move_iterator(s.begin()), std::make_move_iterator(s.end()));
 			}
 			v.insert(v.end(), data.begin(), data.end());	// データ
