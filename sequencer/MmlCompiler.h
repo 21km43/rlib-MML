@@ -2,102 +2,67 @@
 
 namespace rlib::sequencer {
 
-	class MmlCompiler
-	{
+	class MmlCompiler {
 		class Inner;
 	public:
 		static constexpr int timeBase = 480;			// 分解能(4分音符あたりのカウント)
-
-		struct Event {
-			size_t	position = 0;
-			virtual ~Event() {}
-			virtual std::shared_ptr<Event> clone()const = 0;
+	
+		struct EventBase {
+			virtual ~EventBase() {}
+			virtual std::shared_ptr<EventBase> clone()const = 0;
 		};
 
-		struct EventTempo : public Event {
-			double	tempo = 0.0;
-			virtual std::shared_ptr<Event> clone()const {
-				return std::make_shared<EventTempo>(*this);
-			}
-		};
-
-		struct EventSystemExclusive : public Event {
+		struct EventSystemExclusive : public EventBase {
 			std::vector<uint8_t>	data;
-			virtual std::shared_ptr<Event> clone()const {
+			virtual std::shared_ptr<EventBase> clone()const {
 				return std::make_shared<EventSystemExclusive>(*this);
 			}
 		};
 
-		struct EventMeta : public Event {
+		struct EventMeta : public EventBase {
 			uint8_t type = 0;
-			std::string	data;
-			virtual std::shared_ptr<Event> clone()const {
+			std::vector<uint8_t> data;
+			virtual std::shared_ptr<EventBase> clone()const {
 				return std::make_shared<EventMeta>(*this);
 			}
 		};
 
-		struct EventProgramChange : public Event {
+		struct EventProgramChange : public EventBase {
 			uint8_t	programNo = 0;
-			virtual std::shared_ptr<Event> clone()const {
+			virtual std::shared_ptr<EventBase> clone()const {
 				return std::make_shared<EventProgramChange>(*this);
 			}
 		};
-		struct EventVolume : public Event {
-			uint8_t	volume = 0;			// 音量値 0～127
-			virtual std::shared_ptr<Event> clone()const {
-				return std::make_shared<EventVolume>(*this);
-			}
-		};
-
-		struct EventExpression : public Event {
-			uint8_t	expression = 0;			// 値 0～127
-			virtual std::shared_ptr<Event> clone()const {
-				return std::make_shared<EventExpression>(*this);
-			}
-		};
-
-		struct EventPan : public Event {
-			uint8_t	pan = 0;			// パン値 0～127
-			virtual std::shared_ptr<Event> clone()const {
-				return std::make_shared<EventPan>(*this);
-			}
-		};
-		struct EventPitchBend : public Event {
+		struct EventPitchBend : public EventBase {
 			int16_t	pitchBend = 0;
-			virtual std::shared_ptr<Event> clone()const {
+			virtual std::shared_ptr<EventBase> clone()const {
 				return std::make_shared<EventPitchBend>(*this);
 			}
 		};
-		struct EventControlChange : public Event {
+		struct EventControlChange : public EventBase {		// 注:個別イベントに当てはまらないControlChangeがコレに該当する
 			uint8_t	no = 0;				// コントロールNo 0～127
 			uint8_t	value = 0;			// 値 0～127
-			virtual std::shared_ptr<Event> clone()const {
+			virtual std::shared_ptr<EventBase> clone()const {
 				return std::make_shared<EventControlChange>(*this);
 			}
 		};
 
-		struct EventNote : public Event {
+		struct EventNote : public EventBase {
 			uint8_t	note = 0;			// ノート番号 0～127
 			size_t	length = 0;			// 音長(ステップ数)
 			uint8_t	velocity = 0;		// ベロシティ(0～127)
-			virtual std::shared_ptr<Event> clone()const {
+			virtual std::shared_ptr<EventBase> clone()const {
 				return std::make_shared<EventNote>(*this);
 			}
 		};
 
-		struct LessEvent {
-			typedef void is_transparent;
-			bool operator()(const std::shared_ptr<const Event>& a, const std::shared_ptr<const Event>& b)	const { return a->position < b->position; }
-			bool operator()(const size_t a, const std::shared_ptr<const Event>& b)							const { return a < b->position; }
-			bool operator()(const std::shared_ptr<const Event>& a, const size_t b)							const { return a->position < b; }
-		};
-
 		struct Port {
-			std::string name;			// name
-			std::string	instrument;		// instrument
+			std::string_view	name;			// name
+			std::string_view	instrument;		// instrument
 			uint8_t	channel = 0;		// チャンネル
-			std::multiset<std::shared_ptr<const Event>, LessEvent>	eventList;
+			std::multimap<size_t, std::shared_ptr<const EventBase>>	eventList;	// <position,Event>
 		};
+		using Event = decltype(Port::eventList)::value_type;
 
 		enum class ErrorCode {
 			lengthError = 1,				// 音長の指定に誤りがあります
@@ -107,6 +72,8 @@ namespace rlib::sequencer {
 			argumentUnknownError,			// 関数に不明な引数名があります
 			functionCallError,				// 関数呼び出しに誤りがあります
 			unknownNumberError,				// 数値の指定に誤りがあります
+			rangeError,						// 値が範囲外です
+			divideZeroError,				// 除算はゼロ以外を指定してください
 			vCommandError,					// ベロシティ指定（v コマンド）に誤りがあります
 			vCommandRangeError,				// ベロシティ指定（v コマンド）の値が範囲外です
 			lCommandError,					// デフォルト音長指定（l コマンド）に誤りがあります
@@ -161,6 +128,7 @@ namespace rlib::sequencer {
 
 
 		struct Result {
+			std::shared_ptr<const std::string>	mml;	// コンパイルソース(std::string_view の参照元 MML)
 			std::vector<Port>	ports;
 			struct Error {
 				ErrorCode			code;
@@ -170,10 +138,13 @@ namespace rlib::sequencer {
 			bool hasError() const { return errors.size() > 0; };
 
 			static std::string getMessage(ErrorCode code);
-			static std::string getText(const std::string& mml, const std::vector<Error>& errors);
-			static std::string getJson(const std::string& mml, const std::vector<Error>& errors);
+			std::string getText(const std::vector<Error>& errors) const;
+			std::string getJson(const std::vector<Error>& errors) const;
 		};
-		static Result compile(const std::string& mml);
+		static Result compile(const std::shared_ptr<const std::string>& mml);
+		static Result compile(const std::string& mml) {
+			return compile(std::make_shared<const std::string>(mml));
+		}
 
 
 		struct Util {

@@ -7,6 +7,7 @@
 #else
 #include <boost/regex.hpp>
 #endif
+#include <ranges>
 
 #include "MidiEvent.h"
 #include "Smf.h"
@@ -174,10 +175,10 @@ namespace rlib::sequencer {
 				return result;
 			};
 
-			const std::map<std::type_index, std::function<void(const Smf::Events::iterator&)> > map = {
-				{typeid(midi::EventNoteOn), [&](const Smf::Events::iterator& it) {
-					auto& e = static_cast<const midi::EventNoteOn&>(*it->event);
-					if (e.velocity <= 0) return;	// NoteOff扱いのものは無視
+			const std::map<std::type_index, std::function<Smf::Events::const_iterator(const Smf::Events::const_iterator&)> > map = {
+				{typeid(midi::EventNoteOn), [&](const Smf::Events::const_iterator& it) {
+					auto& e = static_cast<const midi::EventNoteOn&>(*it->second);
+					if (e.velocity <= 0) return std::next(it);	// NoteOff扱いのものは無視
 
 					std::string r;
 
@@ -200,12 +201,12 @@ namespace rlib::sequencer {
 					// 音の長さ算出
 					const size_t len = [&]()->decltype(len) {
 						auto r = std::find_if(it, events.end(), [&](auto& x) {
-							return isNoteOff(x.event);
+							return isNoteOff(x.second);
 						});
 						if (r == events.end()) {
 							return 480 / 2;				// ノートオフがなければ8分音符
 						}
-						return r->position - it->position;
+						return r->first - it->first;
 					}();
 
 					static const std::vector<std::string> noteTable = {
@@ -233,7 +234,7 @@ namespace rlib::sequencer {
 						if (i == events.end()) {
 							return false;
 						}
-						if (isNoteOff(i->event) || i->position >= it->position + len) {	// ない?
+						if (isNoteOff(i->second) || i->first >= it->first + len) {	// ない?
 							return false;
 						}
 						return true;
@@ -264,39 +265,85 @@ namespace rlib::sequencer {
 					for (auto i = 1; i < vLen.size(); i++) {
 						mmls.emplace_back(std::move(vLen[i]));
 					}
-
+					return std::next(it);
 				}},
 
-				{typeid(midi::EventControlChange), [&](const Smf::Events::iterator& it) {
-					auto& e = static_cast<const midi::EventControlChange&>(*it->event);
+				{typeid(midi::EventControlChange), [&](const Smf::Events::const_iterator& it) {
+					auto& e = static_cast<const midi::EventControlChange&>(*it->second);
 					switch (e.type) {
 					case midi::EventControlChange::Type::volume:
 						*mmls.rbegin() += string::format("V(%s)", static_cast<int>(e.value));
-						break;
+						return std::next(it);
 					case midi::EventControlChange::Type::expression:
 						*mmls.rbegin() += string::format("Ep(%s)", static_cast<int>(e.value));
-						break;
+						return std::next(it);
 					case midi::EventControlChange::Type::pan:
 						*mmls.rbegin() += string::format("Pan(%s)", static_cast<int>(e.value));
-						break;
-					default:
-						*mmls.rbegin() += string::format("CC(%s,%s)", static_cast<int>(e.type), static_cast<int>(e.value));
+						return std::next(it);
+					case midi::EventControlChange::Type::rpnMSB:{
+						constexpr auto N = 4;	// 4個必要
+						std::vector<std::pair<size_t, std::shared_ptr<const midi::EventControlChange>>> list;
+						auto next = it;
+						for (; next != std::ranges::next(it, N, events.end()); next++) {
+							auto ev = std::dynamic_pointer_cast<const midi::EventControlChange>(next->second);
+							if (!ev) break;
+							list.emplace_back(next->first, ev);
+						}
+						if (list.size() < N) break;
+						if (list[1].second->type != midi::EventControlChange::Type::rpnLSB) break;
+						if (list[2].second->type != midi::EventControlChange::Type::dataEntryMSB) break;
+						if (list[3].second->type != midi::EventControlChange::Type::dataEntryLSB) break;
+						midi::utility::Bit14 type;
+						type.msb = list[0].second->value;
+						type.lsb = list[1].second->value;
+						midi::utility::Bit14 value;
+						value.msb = list[2].second->value;
+						value.lsb = list[3].second->value;
+
+						// FineTune
+						if (type.value == static_cast<uint16_t>(midi::EventControlChange::RpnType::fineTune)) {
+							const auto toFineTune = [](uint16_t raw) {
+								constexpr double inMin = -100.0, inMax = 100.0;
+								constexpr int outMax = 16383;
+								return static_cast<double>(raw) * (inMax - inMin) / (outMax + 1) + inMin;	// -8192～0～8192スケール(+100には微妙に届かない)
+							};
+							double fineTune = toFineTune(value.value);
+							const double v = std::round(fineTune * 100.0) / 100.0;	// 小数点第2位で丸める
+							*mmls.rbegin() += string::format(std::string("FineTune") + (std::floor(v) == v ? "(%.0f)" : "(%.2f)"), v);
+							return next;
+						}
+
+						// CoarseTune
+						if (type.value == static_cast<uint16_t>(midi::EventControlChange::RpnType::coarseTune)) {
+							const int coarseTune = value.value / 0x80 - 64;
+							*mmls.rbegin() += string::format("CoarseTune(%d)", coarseTune);
+							return next;
+						}
+
 						break;
 					}
+					default:
+						break;
+					}
+					// バイナリデータとして出力
+					*mmls.rbegin() += string::format("CC(%s,%s)", static_cast<int>(e.type), static_cast<int>(e.value));
+					return std::next(it);
 				}},
 
-				{typeid(midi::EventProgramChange), [&](const Smf::Events::iterator& it) {
-					auto& e = static_cast<const midi::EventProgramChange&>(*it->event);
+				{typeid(midi::EventProgramChange), [&](const Smf::Events::const_iterator& it) {
+					auto& e = static_cast<const midi::EventProgramChange&>(*it->second);
 					*mmls.rbegin() += string::format("@%d", static_cast<int>(e.programNo));
+					return std::next(it);
 				}},
 
-				{typeid(midi::EventPitchBend), [&](const Smf::Events::iterator& it) {
-					auto& e = static_cast<const midi::EventPitchBend&>(*it->event);
+				{typeid(midi::EventPitchBend), [&](const Smf::Events::const_iterator& it) {
+					auto& e = static_cast<const midi::EventPitchBend&>(*it->second);
 					*mmls.rbegin() += string::format("PitchBend(%d)", static_cast<int>(e.pitchBend));
+					return std::next(it);
 				}},
 
-				{ typeid(midi::EventSystemExclusive), [&](const Smf::Events::iterator& it) {
-					auto& e = static_cast<const midi::EventSystemExclusive&>(*it->event);
+				{typeid(midi::EventSystemExclusive), [&](const Smf::Events::const_iterator& it) {
+					auto& e = static_cast<const midi::EventSystemExclusive&>(*it->second);
 
 					auto isMatch = [](const std::vector<uint8_t>& data, const std::initializer_list<int16_t>& pattern) {
 						if (data.size() < pattern.size()) return false;
@@ -314,7 +361,7 @@ namespace rlib::sequencer {
 						u.lsb = e.data[5];
 						u.msb = e.data[6];
 						*mmls.rbegin() += string::format("\nMasterVolume(%d)", u.value);
-						return;
+						return std::next(it);
 					}
 
 					// その他
@@ -328,15 +375,15 @@ namespace rlib::sequencer {
 					};
 
 					*mmls.rbegin() += string::format("\nSysEx(%s)", join(e.data, ","));
-
+					return std::next(it);
 				} },
 
-				{typeid(midi::EventMeta), [&](const Smf::Events::iterator& it) {
-					auto& e = static_cast<const midi::EventMeta&>(*it->event);
+				{typeid(midi::EventMeta), [&](const Smf::Events::const_iterator& it) {
+					auto& e = static_cast<const midi::EventMeta&>(*it->second);
 					switch (e.type) {
 					case midi::EventMeta::Type::tempo:
 						*mmls.rbegin() += string::format("t%s", e.getTempo());
-						return;
+						return std::next(it);
 					case midi::EventMeta::Type::sequencerLocal:
 						try {
 							// rlib-MML 固有情報なら展開する
@@ -359,7 +406,7 @@ namespace rlib::sequencer {
 											, no, safeText(name), data);
 									}
 								}
-								return;
+								return std::next(it);
 							}
 						} catch (...) {
 						}
@@ -367,14 +414,14 @@ namespace rlib::sequencer {
 					case midi::EventMeta::Type::endOfTrack:
 					case midi::EventMeta::Type::sequenceName:
 					case midi::EventMeta::Type::instrumentName:
-						return;			// 何も出力しない
+						return std::next(it);			// 何も出力しない
 					case midi::EventMeta::Type::text:
 					case midi::EventMeta::Type::copyright:
 					case midi::EventMeta::Type::words:
 						if (auto text = decodeText(e.getText())) {		// 文字列？
 							const auto s = safeText(*text);			// 必要に応じて " で括る
 							*mmls.rbegin() += string::format("\nMeta(type:0x%x,%s)", static_cast<unsigned int>(e.type), s);
-							return;
+							return std::next(it);
 						}
 						break;
 					default:
@@ -389,24 +436,28 @@ namespace rlib::sequencer {
 						return oss.str();
 					};
 					*mmls.rbegin() += string::format("\nMeta(type:0x%x%s)", static_cast<unsigned int>(e.type), toJoinString(e.data));
+					return std::next(it);
 				}},
+
 			};
 
-			for (auto it = events.begin(); it != events.end(); it++) {
-
+			for (auto it = events.begin(); it != events.end(); ) {
 				// delta time (休符)
-				if (const size_t len = it->position - state.position; len > 0) {
+				if (const size_t len = it->first - state.position; len > 0) {
 					auto vLen = getLengthText(len, state.position, true);
 					*mmls.rbegin() += string::format("r%s", vLen[0]);
 					for (auto i = 1; i < vLen.size(); i++) {
 						mmls.emplace_back(std::move(vLen[i]));
 					}
-					state.position = it->position;
+					state.position = it->first;
 				}
-				const auto& ev = *it->event;
+				const auto& ev = *it->second;
 				if (auto i = map.find(typeid(ev)); i != map.end()) {
-					(i->second)(it);
-				}// else assert(false);
+					it = (i->second)(it);
+				} else {
+					// assert(false);
+					it++;
+				}
 			}
 
 			std::string result;
@@ -452,9 +503,9 @@ namespace rlib::sequencer {
 			for (auto& track : smf.tracks) {
 				TrackKey trackKey;
 				for (auto& event : track.events) {
-					if (auto e = std::dynamic_pointer_cast<const midi::EventCh>(event.event)) {
+					if (auto e = std::dynamic_pointer_cast<const midi::EventCh>(event.second)) {
 						resultMapTrack[trackKey][e->channel].insert(event);
-					} else if (auto e = std::dynamic_pointer_cast<const midi::EventMeta>(event.event)) {
+					} else if (auto e = std::dynamic_pointer_cast<const midi::EventMeta>(event.second)) {
 
 						const auto name = [&decodeText](const std::string& s)->std::optional<std::string> {
 
@@ -487,7 +538,7 @@ namespace rlib::sequencer {
 							resultMapTrack[trackKey][metaChannel].insert(event);
 							break;
 						}
-					} else if (auto e = std::dynamic_pointer_cast<const midi::EventSystemExclusive>(event.event)) {
+					} else if (auto e = std::dynamic_pointer_cast<const midi::EventSystemExclusive>(event.second)) {
 						resultMapTrack[trackKey][metaChannel].insert(event);
 					} else {
 						assert(false);
@@ -500,7 +551,7 @@ namespace rlib::sequencer {
 						Smf::Events& dstEvents = i.second.size() <= 1 ? (i.second)[0] : i.second.begin()->second;
 						auto& events = j->second;
 						for (auto k = events.rbegin(); k != events.rend(); k++) {
-							dstEvents.insert(dstEvents.lower_bound(k->position), *k);
+							dstEvents.insert(dstEvents.lower_bound(k->first), *k);
 						}
 						i.second.erase(metaChannel);
 					}

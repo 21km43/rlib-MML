@@ -35,7 +35,7 @@ int main(const int argc, const char* const argv[])
 		po::store(po::command_line_parser(argc, argv).options(desc).positional(pd).run(), vm);
 
 		if (vm.count("version")) {
-			std::cout << "mmltosmf version 1.2.5" << std::endl;
+			std::cout << "mmltosmf version 1.2.6" << std::endl;
 			return 0;
 		}
 
@@ -59,7 +59,7 @@ int main(const int argc, const char* const argv[])
 
 		const auto r = mmlToSmf(mml);
 		if (r.hasError()) {
-			const auto err = format == "json" ? MmlCompiler::Result::getJson(mml, r.errors) : MmlCompiler::Result::getText(mml, r.errors);
+			const auto err = format == "json" ? r.mmlResult.getJson(r.mmlResult.errors) : r.mmlResult.getText(r.mmlResult.errors);
 			std::cerr << err << std::endl;
 			return 1;
 		}

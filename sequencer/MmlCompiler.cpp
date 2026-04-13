@@ -1,12 +1,12 @@
 ﻿
-//#ifndef _MSC_VER
-//#include <bits/stdc++.h>
-//#endif
+
 #include <regex>
 #include <charconv>
 #include <variant>
 #include <optional>
 #include <iostream>
+#include <typeindex>
+
 
 #include <boost/lexical_cast.hpp>
 #include <boost/regex.hpp>
@@ -82,6 +82,8 @@ std::string MmlCompiler::Result::getMessage(ErrorCode code) {
 		{ErrorCode::argumentUnknownError,			u8R"(関数に不明な引数名があります)"},
 		{ErrorCode::functionCallError,				u8R"(関数呼び出しに誤りがあります)"},
 		{ErrorCode::unknownNumberError,				u8R"(数値の指定に誤りがあります)"},
+		{ErrorCode::rangeError,						u8R"(値が範囲外です)"},
+		{ErrorCode::divideZeroError,				u8R"(除算はゼロ以外を指定してください)"},
 		{ErrorCode::vCommandError,					u8R"(ベロシティ指定（v コマンド）に誤りがあります)"},
 		{ErrorCode::vCommandRangeError,				u8R"(ベロシティ指定（v コマンド）の値が範囲外です)"},
 		{ErrorCode::lCommandError,					u8R"(デフォルト音長指定（l コマンド）に誤りがあります)"},
@@ -126,7 +128,7 @@ std::string MmlCompiler::Result::getMessage(ErrorCode code) {
 		{ErrorCode::masterVolumeError,				u8R"(MasterVolume コマンドに誤りがあります)"},
 		{ErrorCode::masterVolumeRangeError,			u8R"(MasterVolume コマンドの値が範囲外です)"},
 		{ErrorCode::expressionError,				u8R"(Expression コマンドに誤りがあります)"},
-		{ErrorCode::expressionRangeError,			u8R"(Expression コマンドの値が範囲外です)"},
+		{ErrorCode::expressionRangeError,			u8R"(Expression コマンドの値は 0～127 の正数あるいは相対値を指定してください)"},
 		{ErrorCode::definePresetFMError,			u8R"(DefinePresetFM コマンドに誤りがあります)"},
 		{ErrorCode::definePresetFMNoError,			u8R"(DefinePresetFM コマンドのプログラムナンバー指定に誤りがあります)"},
 		{ErrorCode::definePresetFMRangeError,		u8R"(DefinePresetFM コマンドの値が範囲外です)"},
@@ -140,10 +142,10 @@ std::string MmlCompiler::Result::getMessage(ErrorCode code) {
 	return "unknown";
 }
 
-std::string MmlCompiler::Result::getText(const std::string& mml, const std::vector<Result::Error>& errors) {
+std::string MmlCompiler::Result::getText(const std::vector<Result::Error>& errors) const {
 	std::string result;
-	for (const auto err : errors) {
-		const auto pos = getLineColumn(mml, err.text);				// 行と列を取得
+	for (const auto& err : errors) {
+		const auto pos = getLineColumn(*mml, err.text);				// 行と列を取得
 		const auto msg = MmlCompiler::Result::getMessage(err.code);	// エラーメッセージ取得
 		const auto errorText = getTextPrefix(err.text, 10);			// エラー箇所のMML
 		result += result.empty() ? "" : "\n";
@@ -152,11 +154,11 @@ std::string MmlCompiler::Result::getText(const std::string& mml, const std::vect
 	return result;
 }
 
-std::string MmlCompiler::Result::getJson(const std::string& mml, const std::vector<Result::Error>& errors) {
+std::string MmlCompiler::Result::getJson(const std::vector<Result::Error>& errors) const {
 	Json json;
 	auto& list = json.ensureMap()["errors"].ensureArray();
-	for (const auto err : errors) {
-		const auto pos = getLineColumn(mml, err.text);				// 行と列を取得
+	for (const auto& err : errors) {
+		const auto pos = getLineColumn(*mml, err.text);				// 行と列を取得
 		const auto msg = MmlCompiler::Result::getMessage(err.code);	// エラーメッセージ取得
 		const auto errorText = getTextPrefix(err.text, 10);			// エラー箇所のMML
 		list.push_back(
@@ -327,6 +329,131 @@ namespace {
 		return std::optional<Result>();
 #endif
 	}
+
+
+	// 数値パース
+	struct ParseNum {
+		enum class Ope {
+			Set, Add, Sub, Mul, Div
+		};
+		struct Assign {
+			std::string_view	next;
+			std::string_view	matched;
+			Ope					ope = Ope::Set;
+			std::variant<intmax_t, double>	value;
+
+			template <typename T=double> T  getValue()const {
+				return std::visit([](auto v) {
+					return static_cast<T>(v);
+				}, value);
+			}
+
+			template <typename T> T apply(T base)const {
+				assert(std::isfinite(base));
+				return std::visit([&](auto&& v) -> T {
+					using V = std::decay_t<decltype(v)>;
+					if constexpr (std::is_integral_v<T> && std::is_integral_v<V>) { // 整数版
+						switch (ope) {
+						case Ope::Set: return static_cast<T>(v);
+						case Ope::Add: return static_cast<T>(base + v);
+						case Ope::Sub: return static_cast<T>(base - v);
+						case Ope::Mul: return static_cast<T>(base * v);
+						case Ope::Div: return static_cast<T>(base / v); // 補足:ゼロ割りはParse時にチェック済
+						}
+					} else {		// 浮動小数点版
+						double db = static_cast<double>(base);
+						double dv = static_cast<double>(v);
+						switch (ope) {
+						case Ope::Set: return static_cast<T>(dv);
+						case Ope::Add: return static_cast<T>(db + dv);
+						case Ope::Sub: return static_cast<T>(db - dv);
+						case Ope::Mul: return static_cast<T>(db * dv);
+						case Ope::Div: return static_cast<T>(db / dv);	 // 補足:ゼロ割りはParse時にチェック済
+						}
+					}
+					assert(false);
+					return base;
+				}, value);
+			}
+
+		};
+		static std::optional<Assign> parse(
+			const std::string_view& text,
+			bool offsetMode = false	// true:符号付は相対指定とする（例："+1"=Add,1.0、"-1.5"=Sub,1.5） false:（例："+1"=Set,1.0、"-1.5"=Ope::Set,-1.5）
+		) {
+			auto assign = [&]()-> std::optional<Assign> {
+				Assign as(text);
+				if (const auto r = isStartsWith(as.next, "+=")) {
+					as.next = *r;
+					as.ope = Ope::Add;
+				} else if (const auto r = isStartsWith(as.next, "-=")) {
+					as.next = *r;
+					as.ope = Ope::Sub;
+				} else if (const auto r = isStartsWith(as.next, "*=")) {
+					as.next = *r;
+					as.ope = Ope::Mul;
+				} else if (const auto r = isStartsWith(as.next, "/=")) {
+					as.next = *r;
+					as.ope = Ope::Div;
+				}
+				int signedMark = 0;
+				if (const auto r = isStartsWith(as.next, '+')) {
+					as.next = *r;		// msvcのfrom_charsは "+1" がパース不可("+1.1","-1"はOK)なので、その意味でもこの処理は必要
+					signedMark = 1;
+				} else if (const auto r = isStartsWith(as.next, '-')) {
+					as.next = *r;
+					signedMark = -1;
+				}
+				if (signedMark != 0) {
+					if (isStartsWith(as.next, '+') || isStartsWith(as.next, '-')) return std::nullopt;	// 符号が連続してるならエラー
+					if (as.ope == Ope::Set && offsetMode) {
+						as.ope = signedMark > 0 ? Ope::Add : Ope::Sub;
+						signedMark = 0;
+					}
+				}
+
+				// 16進数
+				if (const auto r = isStartsWith(as.next, "0x")) {
+					as.next = *r;
+					uintmax_t value;
+					const auto [ptr, ec] = std::from_chars(as.next.data(), as.next.data() + as.next.size(), value, 16);
+					if (ec != std::errc{}) return std::nullopt;
+					as.matched = std::string_view(text.data(), ptr - text.data());
+					as.next = std::string_view(ptr, as.next.data() + as.next.size() - ptr);
+					as.value = static_cast<intmax_t>(value) * (signedMark < 0 ? -1 : 1);
+					return as;
+				}
+
+				double value;
+				const auto [ptr, ec] = std::from_chars(as.next.data(), as.next.data() + as.next.size(), value, std::chars_format::fixed); // fixed:指数表記(e)を禁止 "v76e5" のようなケースを考慮。 
+				if (ec != std::errc()) return std::nullopt;
+				const char* p = as.next.data();
+				for (; p < ptr; p++) {
+					if (*p == '.') { // 指数表記を禁止してるので 'e','E' は考慮しない
+						as.value = value * (signedMark < 0 ? -1 : 1);
+						break;
+					}
+				}
+				if (p >= ptr) as.value = static_cast<intmax_t>(value) * (signedMark < 0 ? -1 : 1);
+				as.matched = std::string_view(text.data(), ptr - text.data());
+				as.next = std::string_view(ptr, as.next.data() + as.next.size() - ptr);
+				return as;
+			}();
+
+			if (assign && assign->ope == Ope::Div) {	// ゼロ割りチェック
+				std::visit([&](auto&& v) {
+					using V = std::decay_t<decltype(v)>;
+					if constexpr (std::is_floating_point_v<V>) {
+						if (v == static_cast<V>(0.0)) throw MmlException(MmlCompiler::ErrorCode::divideZeroError, assign->matched);
+					} else {
+						if (v == 0) throw MmlException(MmlCompiler::ErrorCode::divideZeroError, assign->matched);
+					}
+				}, assign->value);
+			}
+
+			return assign;
+		}
+	};
 
 	// 関数解析
 	struct ParseFunctionResult {
@@ -561,12 +688,153 @@ namespace {
 		return result;
 	}
 
+
+	namespace ParseFunc {
+		struct Args {
+			const std::string_view args;
+			const std::string_view functionName;
+			const bool disableArgName;
+
+			template <typename F> std::string_view parse(F funcArg)const {
+				std::string_view currentArgName;
+				size_t argCount = 0;	// 名前ナシ引数数
+				union {									// 次トークン情報
+					struct {
+						uint16_t	rightParen : 1;		// )
+						uint16_t	comma : 1;			// ,
+						uint16_t	argName : 1;		// 引数名
+						uint16_t	argValue : 1;		// 引数値
+					};
+					uint16_t		all = 0;
+				}flags;
+				flags.rightParen = true;
+				flags.argName = true;
+				flags.argValue = true;
+
+				auto next = args;
+				while (true) {
+					next = skipComment(next);		// コメントを読み飛ばす
+					if (next.empty()) break;			// 先がないならエラー
+
+					if (flags.rightParen) {
+						if (const auto r = isStartsWith(next, ')')) {		// ")"
+							return *r;	// 正常終了
+						}
+					}
+
+					if (flags.comma) {
+						if (const auto r = isStartsWith(next, ',')) {		// ","
+							next = *r;
+							flags.all = 0;
+							flags.rightParen = true;
+							flags.argName = true;
+							flags.argValue = true;
+							continue;
+						}
+					}
+
+					if (flags.argName) {		// 引数名
+						static const auto re = regex(R"(^([a-zA-Z]\w*))");
+						if (const auto m = regexSearch(next, re)) {
+							auto n = std::string_view((*m)[0].second, next.end());
+							n = skipComment(n);			// コメントを読み飛ばす
+							if (const auto r = isStartsWith(n, ':')) {		// ":" があれば引数名で確定
+								currentArgName = std::string_view(std::to_address((*m)[0].first), (*m)[0].length());
+
+								if (disableArgName) {	// 名前付き引数は非サポート
+									throw MmlException(MmlCompiler::ErrorCode::argumentError, currentArgName);	// 名前アリ引数は未対応
+								}
+
+								next = *r;
+								flags.all = 0;
+								flags.argValue = true;
+								continue;
+							}
+						}
+					}
+
+					if (flags.argValue) {		// 引数値
+						const std::variant<std::string_view, size_t> argKey = currentArgName.empty() ? decltype(argKey)(argCount++) : decltype(argKey)(currentArgName);
+						next = funcArg(argKey, next);
+						flags.all = 0;
+						flags.rightParen = true;
+						flags.comma = true;
+						currentArgName = std::string_view{};
+						continue;
+					}
+
+					break;		// どれにも該当しないならエラー
+				}
+				throw MmlException(MmlCompiler::ErrorCode::functionCallError, next);
+
+			}
+
+		};
+
+		std::optional<Args> parse(const std::string_view& text, const std::vector<std::string>& functionNames, bool disableArgName) {
+			for (auto& name : functionNames) {
+				const auto r = isStartsWith(text, name);
+				if (!r) continue;
+				auto next = skipComment(*r);		// コメントを読み飛ばす
+				const auto r2 = isStartsWith(next, '(');	// 関数の"(" を確認
+				if (!r2) continue;
+				Args args{ *r2, { text.begin(), text.begin() + name.size() }, disableArgName };
+				return std::optional(args);
+			}
+			return std::nullopt;
+		};
+
+	};
+
 }
-
-
 
 class MmlCompiler::Inner {
 public:
+
+	struct InterEvent : public MmlCompiler::EventBase {
+		ParseNum::Assign 	assign;
+	};
+	struct InterPitchBend : public InterEvent {
+		virtual std::shared_ptr<EventBase> clone()const {
+			return std::make_shared<InterPitchBend>(*this);
+		}
+	};
+	struct InterPan : public InterEvent {
+		virtual std::shared_ptr<EventBase> clone()const {
+			return std::make_shared<InterPan>(*this);
+		}
+	};
+	struct InterExpression : public InterEvent {
+		virtual std::shared_ptr<EventBase> clone()const {
+			return std::make_shared<InterExpression>(*this);
+		}
+	};
+	struct InterVolume : public InterEvent {
+		virtual std::shared_ptr<EventBase> clone()const {
+			return std::make_shared<InterVolume>(*this);
+		}
+	};
+	struct InterFineTune : public InterEvent {
+		virtual std::shared_ptr<EventBase> clone()const {
+			return std::make_shared<InterFineTune>(*this);
+		}
+	};
+	struct InterCoarseTune : public InterEvent {
+		virtual std::shared_ptr<EventBase> clone()const {
+			return std::make_shared<InterCoarseTune>(*this);
+		}
+	};
+	struct InterMasterVolume : public InterEvent {
+		virtual std::shared_ptr<EventBase> clone()const {
+			return std::make_shared<InterMasterVolume>(*this);
+		}
+	};
+	struct InterTempo : public InterEvent {
+		virtual std::shared_ptr<EventBase> clone()const {
+			return std::make_shared<InterTempo>(*this);
+		}
+	};
+
 	struct Sequence {
 		std::string			name;
 		std::vector<Port>	ports;
@@ -585,17 +853,15 @@ public:
 			size_t						position = 0;			// 現在の位置
 			size_t						defaultStep = 480;		// デフォルト音長(step)
 			int							octave = 4;				// 現在のオクターブ( -2 ～ 8 )
-			int							velocity = 100;			// 現在のベロシティ(0～127)
-			int							volume = 100;			// 現在のボリューム(0～127)
-			int							expression = 127;		// 現在のexpressions(0～127)
-			int							pan = 64;				// 現在のパン(0～127)
+			double						velocity = 100.0;		// 現在のベロシティ(0～127)
 			std::shared_ptr<EventNote>	beforeEvent;			// 直前の音符( ^の対象)
 			bool						noteUnmove = false;		// Noteで現在位置を進めないモード
 			MmlCompiler::Port			port;
 		};
 		struct State {
 			const Sequences& parentSequences;	// 親から(引数で)引き継がれたsequences
-			std::map<std::string_view, PortInfo>	mapPort;
+			std::vector<Result::Error> errors;
+			std::map<std::string_view, PortInfo>	mapPort;	// <Port名,PortInfo>
 			PortInfo* currentPort = nullptr;
 			Sequences						sequences;
 			struct PastedSequence {
@@ -669,7 +935,6 @@ public:
 				auto& port = *state.currentPort;
 				const auto len = parseLength(next, port.defaultStep);
 				auto e = std::make_shared<EventNote>();
-				e->position = port.position;
 				e->note = [&] {
 					static const std::map<std::string, int> noteTable{
 						{"c",	0},	{"c-",	-1},{"c+",	1},
@@ -689,8 +954,8 @@ public:
 					throw MmlException(ErrorCode::noteCommandRangeError, text);
 				}();
 				e->length = len.step;
-				e->velocity = port.velocity;
-				port.port.eventList.insert(e);
+				e->velocity = std::clamp(static_cast<int>(std::lround(port.velocity)), 0, 127);
+				port.port.eventList.emplace(port.position, e);
 				if (!port.noteUnmove) {
 					port.position += len.step;
 				}
@@ -703,19 +968,17 @@ public:
 				const auto r = isStartsWith(text, 'v');
 				if (!r) return std::nullopt;
 				auto next = skipComment(*r);			// コメントを読み飛ばす
-				const auto v = parseInt(next);
-				if (!v) throw MmlException(ErrorCode::vCommandError, text);
+				const auto r2 = ParseNum::parse(next, true);
+				if (!r2) throw MmlException(MmlCompiler::ErrorCode::vCommandError, text);
+				const auto vel = r2->getValue();
+				if (r2->ope == ParseNum::Ope::Set) {	// 絶対指定なら
+					if (vel < 0 || vel > 127) throw MmlException(ErrorCode::vCommandRangeError, r2->matched);
+				} else {								// 相対指定なら
+					if (vel < -127 || vel > 127) throw MmlException(ErrorCode::vCommandRangeError, r2->matched);
+				}
 				auto& port = *state.currentPort;
-				if (auto p = std::get_if<intmax_t>(&v->value)) {// 符号付きなら相対指定
-					const intmax_t n = port.velocity + *p;
-					port.velocity = static_cast<decltype(port.velocity)>(std::min<decltype(n)>(std::max<decltype(n)>(n, 0), 127));
-				} else if (auto p = std::get_if<uintmax_t>(&v->value)) {
-					if (*p < 0 || *p > 127) {		// 範囲チェック
-						throw MmlException(ErrorCode::vCommandRangeError, text);
-					}
-					port.velocity = static_cast<decltype(port.velocity)>(*p);
-				} else assert(false);
-				return v->next;
+				port.velocity = r2->apply(port.velocity);
+				return r2->next;
 			}},
 
 			// < > オクターブUPDOWN
@@ -785,9 +1048,8 @@ public:
 				if (!m) throw MmlException(ErrorCode::programchangeCommandError, next);
 				auto& port = *state.currentPort;
 				auto e = std::make_shared<EventProgramChange>();
-				e->position = port.position;
 				e->programNo = boost::lexical_cast<int>((*m)[1].str());
-				port.port.eventList.insert(e);
+				port.port.eventList.emplace(port.position, e);
 				return std::string_view((*m)[0].second, next.end());
 			} },
 
@@ -796,60 +1058,75 @@ public:
 				const auto r = isStartsWith(text, 't');
 				if (!r) return std::nullopt;
 				auto next = skipComment(*r);			// コメントを読み飛ばす
-				const auto r2 = parseDouble(next);
-				if (!r2) throw MmlException(ErrorCode::tCommandRangeError, text);
+				const auto r2 = ParseNum::parse(next, true);
+				if (!r2) throw MmlException(MmlCompiler::ErrorCode::tCommandRangeError, text);
+				const auto tempo = r2->getValue();
+				if (r2->ope == ParseNum::Ope::Set) {	// 絶対指定なら
+					if (tempo < 1 || tempo >= 1000) throw MmlException(ErrorCode::rangeError, r2->matched);
+				} else {								// 相対指定なら
+					if (tempo < -100 || tempo > 100) throw MmlException(ErrorCode::rangeError, r2->matched);
+				}
+				auto e = std::make_shared<InterTempo>();
+				e->assign = *r2;
 				auto& port = *state.currentPort;
-				auto e = std::make_shared<EventTempo>();
-				e->position = port.position;
-				e->tempo = r2->value;
-				port.port.eventList.insert(e);
+				port.port.eventList.emplace(port.position, e);
 				return r2->next;
 			} },
 
 			// Volume
 			{ ErrorCode::volumeError,[](State& state,const std::string_view& text)->std::optional<std::string_view> {
-				auto r = parseFunction(text, { "V","Volume" }, {});
-				if (!r) return std::nullopt;
-				auto& port = *state.currentPort;
-				if (const auto v = r->findArg<intmax_t>(0).second) {	// 符号付なら相対指定
-					const intmax_t n = port.volume + *v;
-					port.volume = static_cast<decltype(port.volume)>(std::min<decltype(n)>(std::max<decltype(n)>(n, 0), 127));
-				} else if (const auto v = r->findArg<uintmax_t>(0).second) {	//  符号ナシなら絶対指定
-					if (*v < 0 || *v > 127) {
-						throw MmlException(ErrorCode::volumeRangeError, text);
+				const auto args = ParseFunc::parse(text, { "V","Volume" }, true);
+				if (!args) return std::nullopt;
+				const auto next = args->parse([&](const auto& argKey, const std::string_view& argValue) {
+					if (auto argIndex = std::get_if<std::size_t>(&argKey)) {
+						if (*argIndex > 0) throw MmlException(MmlCompiler::ErrorCode::argumentError, argValue);	// 名前ナシ引数は1つまで
+						auto& port = *state.currentPort;
+						const auto r = ParseNum::parse(argValue, true);
+						if (!r) throw MmlException(MmlCompiler::ErrorCode::volumeRangeError, argValue);
+						if (r->ope == ParseNum::Ope::Set) {	// 絶対指定なら
+							if (auto val = std::get_if<double>(&r->value)) {
+								throw MmlException(ErrorCode::volumeRangeError, r->matched);	// 浮動小数はエラー
+							} else if (auto val = std::get_if<intmax_t>(&r->value)) {
+								if (*val < 0 || *val > 127) throw MmlException(ErrorCode::volumeRangeError, r->matched);
+							} else assert(false);
+						}
+						auto e = std::make_shared<InterVolume>();
+						e->assign = *r;
+						port.port.eventList.emplace(port.position, e);
+						return r->next;
 					}
-					port.volume = static_cast<decltype(port.volume)>(*v);
-				} else {
-					throw MmlException(ErrorCode::volumeError, text);
-				}
-				auto e = std::make_shared<EventVolume>();
-				e->position = port.position;
-				e->volume = port.volume;
-				port.port.eventList.insert(e);
-				return r->next;
+					assert(false);
+					return argValue;
+				});
+				return next;
 			} },
 
 			// Expression
 			{ ErrorCode::expressionError,[](State& state,const std::string_view& text)->std::optional<std::string_view> {
-				auto r = parseFunction(text, { "Expression","Ep"}, {});
-				if (!r) return std::nullopt;
-				auto& port = *state.currentPort;
-				if (const auto v = r->findArg<intmax_t>(0).second) {	// 符号付なら相対指定
-					const intmax_t n = port.expression + *v;
-					port.expression = static_cast<decltype(port.expression)>(std::min<decltype(n)>(std::max<decltype(n)>(n, 0), 127));
-				} else if (const auto v = r->findArg<uintmax_t>(0).second) {	//  符号ナシなら絶対指定
-					if (*v < 0 || *v > 127) {
-						throw MmlException(ErrorCode::expressionRangeError, text);
+				const auto args = ParseFunc::parse(text, { "Ep","Expression"}, true);
+				if(!args) return std::nullopt;
+				const auto next = args->parse([&](const auto& argKey, const std::string_view& argValue) {
+					if (auto argIndex = std::get_if<std::size_t>(&argKey)) {
+						if (*argIndex > 0) throw MmlException(MmlCompiler::ErrorCode::argumentError, argValue);	// 名前ナシ引数は1つまで
+						auto& port = *state.currentPort;
+						const auto r = ParseNum::parse(argValue, true);
+						if (!r) throw MmlException(MmlCompiler::ErrorCode::expressionRangeError, argValue);
+						if (r->ope == ParseNum::Ope::Set) {	// 絶対指定なら
+							if (auto val = std::get_if<double>(&r->value)) {
+								throw MmlException(ErrorCode::expressionRangeError, r->matched);	// 浮動小数はエラー
+							} else if (auto val = std::get_if<intmax_t>(&r->value)) {
+								if (*val < 0 || *val > 127) throw MmlException(ErrorCode::expressionRangeError, r->matched);
+							} else assert(false);
+						}
+						auto e = std::make_shared<InterExpression>();
+						e->assign = *r;
+						port.port.eventList.emplace(port.position, e);
+						return r->next;
 					}
-					port.expression = static_cast<decltype(port.expression)>(*v);
-				} else {
-					throw MmlException(ErrorCode::expressionError, text);
-				}
-				auto e = std::make_shared<EventExpression>();
-				e->position = port.position;
-				e->expression = port.expression;
-				port.port.eventList.insert(e);
-				return r->next;
+					assert(false);
+					return argValue;
+				});
+				return next;
 			} },
 
 			// ControlChange
@@ -871,51 +1148,66 @@ public:
 				}
 				auto& port = *state.currentPort;
 				auto e = std::make_shared<EventControlChange>();
-				e->position = port.position;
 				e->no = static_cast<decltype(e->no)>(no);
 				e->value = static_cast<decltype(e->value)>(val);
-				port.port.eventList.insert(e);
+				port.port.eventList.emplace(port.position, e);
 				return r->next;
 			} },
 				
 			// PitchBend
 			{ ErrorCode::pitchBendError,[](State& state,const std::string_view& text)->std::optional<std::string_view> {
-				auto r = parseFunction(text, { "PitchBend" }, {});
-				if (!r) return std::nullopt;
-				const auto v = r->findArgInt(0);
-				if (!v) throw MmlException(ErrorCode::pitchBendError, text);
-				auto& port = *state.currentPort;
-				if (*v < -8192 || *v > 8191) {
-					throw MmlException(ErrorCode::pitchBendRangeError, text);
-				}
-				auto e = std::make_shared<EventPitchBend>();
-				e->position = port.position;
-				e->pitchBend = static_cast<decltype(e->pitchBend)>(*v);
-				port.port.eventList.insert(e);
-				return r->next;
+				const auto args = ParseFunc::parse(text, { "PitchBend" }, true);
+				if (!args) return std::nullopt;
+				const auto next = args->parse([&](const auto& argKey, const std::string_view& argValue) {
+					if (auto argIndex = std::get_if<std::size_t>(&argKey)) {
+						if (*argIndex > 0) throw MmlException(MmlCompiler::ErrorCode::argumentError, argValue);	// 名前ナシ引数は1つまで
+						auto& port = *state.currentPort;
+						const auto r = ParseNum::parse(argValue);
+						if (!r) throw MmlException(MmlCompiler::ErrorCode::pitchBendRangeError, argValue);
+						if (r->ope == ParseNum::Ope::Set) {	// 絶対指定なら
+							if (auto val = std::get_if<double>(&r->value)) {
+								throw MmlException(ErrorCode::pitchBendRangeError, r->matched);	// 浮動小数はエラー
+							} else if (auto val = std::get_if<intmax_t>(&r->value)) {
+								if (*val < -8192 || *val > 8191) throw MmlException(ErrorCode::pitchBendRangeError, r->matched);
+							} else assert(false);
+						}
+						auto e = std::make_shared<InterPitchBend>();
+						e->assign = *r;
+						port.port.eventList.emplace(port.position, e);
+						return r->next;
+					}
+					assert(false);
+					return argValue;
+				});
+				return next;
 			} },
 
 			// Pan
 			{ ErrorCode::panError,[](State& state,const std::string_view& text)->std::optional<std::string_view> {
-				auto r = parseFunction(text, { "Pan" }, {});
-				if (!r) return std::nullopt;
-				auto& port = *state.currentPort;
-				if (const auto v = r->findArg<intmax_t>(0).second) {	// 符号付なら相対指定
-					const intmax_t n = port.pan + *v;
-					port.pan = static_cast<decltype(port.pan)>(std::min<decltype(n)>(std::max<decltype(n)>(n, 0), 127));
-				} else if (const auto v = r->findArg<uintmax_t>(0).second) {	//  符号ナシなら絶対指定
-					if (*v < 0 || *v > 127) {
-						throw MmlException(ErrorCode::panRangeError, text);
+				const auto args = ParseFunc::parse(text, { "Pan"}, true);
+				if (!args) return std::nullopt;
+				const auto next = args->parse([&](const auto& argKey, const std::string_view& argValue) {
+					if (auto argIndex = std::get_if<std::size_t>(&argKey)) {
+						if (*argIndex > 0) throw MmlException(MmlCompiler::ErrorCode::argumentError, argValue);	// 名前ナシ引数は1つまで
+						auto& port = *state.currentPort;
+						const auto r = ParseNum::parse(argValue, true);
+						if (!r) throw MmlException(MmlCompiler::ErrorCode::panRangeError, argValue);
+						if (r->ope == ParseNum::Ope::Set) {	// 絶対指定なら
+							if (auto val = std::get_if<double>(&r->value)) {
+								throw MmlException(ErrorCode::panRangeError, r->matched);	// 浮動小数はエラー
+							} else if (auto val = std::get_if<intmax_t>(&r->value)) {
+								if (*val < 0 || *val > 127) throw MmlException(ErrorCode::panRangeError, r->matched);
+							} else assert(false);
+						}
+						auto e = std::make_shared<InterPan>();
+						e->assign = *r;
+						port.port.eventList.emplace(port.position, e);
+						return r->next;
 					}
-					port.pan = static_cast<decltype(port.pan)>(*v);
-				} else {
-					throw MmlException(ErrorCode::panError, text);
-				}
-				auto e = std::make_shared<EventPan>();
-				e->position = port.position;
-				e->pan = port.pan;
-				port.port.eventList.insert(e);
-				return r->next;
+					assert(false);
+					return argValue;
+				});
+				return next;
 			} },
 
 			// Port
@@ -951,17 +1243,19 @@ public:
 				Sequence seq;
 				seq.name = name;
 
-				seq.ports = [&] {
-					Sequences seq = state.parentSequences;
-					for (auto s : state.sequences) seq.insert(s);		// sequencesを合成
-					return mmlToSequence(*mml, seq);
-				}();
+				try {
+					Sequences parentSeq = state.parentSequences;
+					for (auto s : state.sequences) parentSeq.insert(s);		// sequencesを合成
+					seq.ports = mmlToSequence(*mml, parentSeq);
+				} catch (MmlException& e) {
+					state.errors.insert(state.errors.end(), e.errors.begin(), e.errors.end());
+				}
 
 				seq.lastPosition = [&] {
 					size_t p = 0;
 					for (auto& port : seq.ports) {
 						if (auto i = port.eventList.rbegin(); i != port.eventList.rend()) {
-							p = (std::max)(p, (*i)->position);
+							p = (std::max)(p, i->first);
 						}
 					}
 					return p;
@@ -1016,84 +1310,83 @@ public:
 
 			// FineTune
 			{ErrorCode::fineTuneError,[](State& state,const std::string_view& text)->std::optional<std::string_view> {
-				auto r = parseFunction(text, { "FineTune" }, {});
-				if (!r) return std::nullopt;
-				const auto v = r->findArgNumber(0);
-				if (!v) throw MmlException(ErrorCode::fineTuneError, text);
-				auto& port = *state.currentPort;
-
-				constexpr double inMin = -100.0;
-				constexpr double inMax = 100.0;
-				if (*v < inMin || *v > inMax) {
-					throw MmlException(ErrorCode::fineTuneRangeError, text);
-				}
-				constexpr int outMax = 16383;
-				const auto n = static_cast<int>(std::round((*v - inMin) * outMax / (inMax - inMin)));
-				const auto raw = std::clamp(n, 0, outMax);
-
-				struct {
-					midi::EventControlChange::Type no;
-					uint8_t val;
-				}const tbl[] = {
-					{midi::EventControlChange::Type::rpnMSB,		static_cast<uint16_t>(midi::EventControlChange::RpnType::fineTune) / 0x80 & 0x7f	},
-					{midi::EventControlChange::Type::rpnLSB,		static_cast<uint16_t>(midi::EventControlChange::RpnType::fineTune) & 0x7f	},
-					{midi::EventControlChange::Type::dataEntryMSB,	static_cast<uint8_t>(raw / 0x80 & 0x7f)	},
-					{midi::EventControlChange::Type::dataEntryLSB,	static_cast<uint8_t>(raw & 0x7f)	},
-				};
-				for (auto& t : tbl) {
-					auto e = std::make_shared<EventControlChange>();
-					e->position = port.position;
-					e->no = static_cast<decltype(e->no)>(t.no);
-					e->value = t.val;
-					port.port.eventList.insert(e);
-				}
-				return r->next;
+				const auto args = ParseFunc::parse(text, { "FineTune"}, true);
+				if (!args) return std::nullopt;
+				const auto next = args->parse([&](const auto& argKey, const std::string_view& argValue) {
+					if (auto argIndex = std::get_if<std::size_t>(&argKey)) {
+						if (*argIndex > 0) throw MmlException(MmlCompiler::ErrorCode::argumentError, argValue);	// 名前ナシ引数は1つまで
+						auto& port = *state.currentPort;
+						const auto r = ParseNum::parse(argValue);
+						if (!r) throw MmlException(MmlCompiler::ErrorCode::fineTuneRangeError, argValue);
+						const double n = r->getValue();
+						if (r->ope == ParseNum::Ope::Set) {	// 絶対指定なら
+							if (n < -100.0 || n > 100.0) throw MmlException(ErrorCode::fineTuneRangeError, r->matched);
+						} else {							// 相対指定なら
+							if (n < -200.0 || n > 200.0) throw MmlException(ErrorCode::fineTuneRangeError, r->matched);
+						}
+						auto e = std::make_shared<InterFineTune>();
+						e->assign = *r;
+						port.port.eventList.emplace(port.position, e);
+						return r->next;
+					}
+					assert(false);
+					return argValue;
+				});
+				return next;
 			}},
 
 			// CoarseTune
 			{ErrorCode::coarseTuneError,[](State& state,const std::string_view& text)->std::optional<std::string_view> {
-				auto r = parseFunction(text, { "CoarseTune" }, {});
-				if (!r) return std::nullopt;
-				const auto v = r->findArgInt(0);
-				if (!v) throw MmlException(ErrorCode::coarseTuneError, text);
-				auto& port = *state.currentPort;
-				if (*v < -64 || *v > 63) {
-					throw MmlException(ErrorCode::coarseTuneRangeError, text);
-				}
-				struct {
-					midi::EventControlChange::Type no;
-					uint8_t val;
-				}const tbl[] = {
-					{midi::EventControlChange::Type::rpnMSB,		static_cast<uint16_t>(midi::EventControlChange::RpnType::coarseTune) / 0x80 & 0x7f	},
-					{midi::EventControlChange::Type::rpnLSB,		static_cast<uint16_t>(midi::EventControlChange::RpnType::coarseTune) & 0x7f	},
-					{midi::EventControlChange::Type::dataEntryMSB,	static_cast<uint8_t>((*v + 64) & 0x7f)	},
-					{midi::EventControlChange::Type::dataEntryLSB,	0	},
-				};
-				for (auto& t : tbl) {
-					auto e = std::make_shared<EventControlChange>();
-					e->position = port.position;
-					e->no = static_cast<decltype(e->no)>(t.no);
-					e->value = t.val;
-					port.port.eventList.insert(e);
-				}
-				return r->next;
+				const auto args = ParseFunc::parse(text, { "CoarseTune"}, true);
+				if (!args) return std::nullopt;
+				const auto next = args->parse([&](const auto& argKey, const std::string_view& argValue) {
+					if (auto argIndex = std::get_if<std::size_t>(&argKey)) {
+						if (*argIndex > 0) throw MmlException(MmlCompiler::ErrorCode::argumentError, argValue);	// 名前ナシ引数は1つまで
+						auto& port = *state.currentPort;
+						const auto r = ParseNum::parse(argValue);
+						if (!r) throw MmlException(MmlCompiler::ErrorCode::coarseTuneRangeError, argValue);
+						if (r->ope == ParseNum::Ope::Set) {	// 絶対指定なら
+							if (std::get_if<double>(&r->value)) throw MmlException(ErrorCode::panRangeError, r->matched);	// 浮動小数はエラー
+						}
+						const double n = r->getValue();
+						if (n < -64 || n > 63) throw MmlException(ErrorCode::coarseTuneRangeError, r->matched);
+						auto e = std::make_shared<InterCoarseTune>();
+						e->assign = *r;
+						port.port.eventList.emplace(port.position, e);
+						return r->next;
+					}
+					assert(false);
+					return argValue;
+				});
+				return next;
 			} },
-
 
 			// MasterVolume
 			{ ErrorCode::masterVolumeError,[](State& state,const std::string_view& text)->std::optional<std::string_view> {
-				auto r = parseFunction(text, { "MasterVolume" }, {});
-				if (!r) return std::nullopt;
-				const auto v = r->findArgInt(0);
-				if (!v) throw MmlException(ErrorCode::masterVolumeError, text);
-				auto& port = *state.currentPort;
-				if (*v < 0 || *v > 16383) throw MmlException(ErrorCode::masterVolumeRangeError, text);
-				auto e = std::make_shared<EventSystemExclusive>();
-				e->position = port.position;
-				midi::utility::Bit14 u(static_cast<uint16_t>(*v));
-				e->data = { 0xf0, 0x7f, 0x7f, 0x04, 0x1, static_cast<uint8_t>(u.lsb), static_cast<uint8_t>(u.msb), 0xf7 };
-				port.port.eventList.insert(e);
-				return r->next;
+				const auto args = ParseFunc::parse(text, { "MasterVolume"}, true);
+				if (!args) return std::nullopt;
+				const auto next = args->parse([&](const auto& argKey, const std::string_view& argValue) {
+					if (auto argIndex = std::get_if<std::size_t>(&argKey)) {
+						if (*argIndex > 0) throw MmlException(MmlCompiler::ErrorCode::argumentError, argValue);	// 名前ナシ引数は1つまで
+						auto& port = *state.currentPort;
+						const auto r = ParseNum::parse(argValue, true);
+						if (!r) throw MmlException(MmlCompiler::ErrorCode::masterVolumeRangeError, argValue);
+						if (r->ope == ParseNum::Ope::Set) {	// 絶対指定なら
+							if (auto val = std::get_if<double>(&r->value)) {
+								throw MmlException(ErrorCode::masterVolumeRangeError, r->matched);	// 浮動小数はエラー
+							} else if (auto val = std::get_if<intmax_t>(&r->value)) {
+								if (*val < 0 || *val > 16383) throw MmlException(ErrorCode::masterVolumeRangeError, r->matched);
+							} else assert(false);
+						}
+						auto e = std::make_shared<InterMasterVolume>();
+						e->assign = *r;
+						port.port.eventList.emplace(port.position, e);
+						return r->next;
+					}
+					assert(false);
+					return argValue;
+				});
+				return next;
 			} },
 
 			// Meta
@@ -1107,7 +1400,6 @@ public:
 				auto& port = *state.currentPort;
 				auto e = std::make_shared<EventMeta>();
 				e->type = static_cast<decltype(e->type)>(*type);
-				e->position = port.position;
 				for (auto& arg : r->argsList) {
 					std::visit([&](auto&& val) {
 						using T = std::decay_t<decltype(val)>;
@@ -1118,13 +1410,13 @@ public:
 							if (val < std::numeric_limits<uint8_t>::min() || val > std::numeric_limits<uint8_t>::max()) throw MmlException(ErrorCode::metaTypeError, text);
 							e->data.push_back(static_cast<uint8_t>(val));
 						} else if constexpr (std::is_same_v<T, std::string_view>) {
-							e->data.append(val);
+							e->data.insert(e->data.end(), val.begin(), val.end());
 						} else {
 							throw MmlException(ErrorCode::metaTypeError, text);
 						}
 					}, arg);
 				}
-				port.port.eventList.insert(e);
+				port.port.eventList.emplace(port.position, e);
 				return r->next;
 			}},
 
@@ -1134,7 +1426,6 @@ public:
 				if (!r) return std::nullopt;
 				auto& port = *state.currentPort;
 				auto e = std::make_shared<EventSystemExclusive>();
-				e->position = port.position;
 				for (auto& arg : r->argsList) {
 					std::visit([&](auto&& val) {
 						using T = std::decay_t<decltype(val)>;
@@ -1154,7 +1445,7 @@ public:
 				if (e->data.size() <= 0 || (e->data[0] != 0xf7 && e->data[0] != 0xf0)) {	// 先頭バイトチェック
 					throw MmlException(ErrorCode::sysExArgFirstError, text);
 				}
-				port.port.eventList.insert(e);
+				port.port.eventList.emplace(port.position, e);
 				return r->next;
 			}},
 
@@ -1195,17 +1486,13 @@ public:
 				auto& port = *state.currentPort;
 				auto e = std::make_shared<EventMeta>();
 				e->type = static_cast<decltype(e->type)>(midi::EventMeta::Type::sequencerLocal);
-				e->position = port.position;
-				e->data = j.stringify();
-				auto it = port.port.eventList.insert(e);
+				auto stringified = j.stringify();
+				e->data = { stringified.begin(), stringified.end() };
+				auto it = port.port.eventList.emplace(port.position, e);
 				return r->next;
 			}},
-
-
-
 		};
 
-		std::vector<Result::Error> errors;
 		for (auto next = targetMml; true;) {
 			try {
 				next = skipComment(next);			// コメントを読み飛ばす
@@ -1225,7 +1512,7 @@ public:
 				}
 				if (i == parsers.end()) throw MmlException(ErrorCode::unknownError, next);	// 未定義文字列エラー
 			} catch (MmlException& e) {
-				errors.insert(errors.end(), e.errors.begin(), e.errors.end());
+				state.errors.insert(state.errors.end(), e.errors.begin(), e.errors.end());
 
 				// 行末まで飛ぶ(改行が無ければ末尾まで飛ぶ)
 				if (auto pos = next.find_first_of("\r\n"); pos != std::string_view::npos) {
@@ -1236,7 +1523,7 @@ public:
 
 			}
 		}
-		if (errors.size() > 0) throw MmlException(std::move(errors));
+		if (state.errors.size() > 0) throw MmlException(std::move(state.errors));
 
 		std::vector<Port> ports; // Result result;
 		for (auto& i : state.mapPort) {
@@ -1254,14 +1541,13 @@ public:
 				p.name = port.name;
 				p.instrument = port.instrument;
 				p.channel = port.channel;
-				for (auto& spEvent : port.eventList) {
-					auto sp = spEvent->clone();
-					if (sp->position >= length) {			// length より後は採用しない
-						break;
-					}
-					sp->position += postion;
-					p.eventList.insert(sp);
+
+				for (auto& event : port.eventList) {
+					auto sp = event.second->clone();
+					if (event.first >= length) break;			// length より後は採用しない
+					p.eventList.emplace(event.first + postion, sp);
 				}
+
 				ports.emplace_back(std::move(p));
 			}
 		}
@@ -1271,13 +1557,168 @@ public:
 
 };
 
-MmlCompiler::Result MmlCompiler::compile(const std::string& mml) {
-	Result r;
+MmlCompiler::Result MmlCompiler::compile(const std::shared_ptr<const std::string>& mml) {
+	Result r{ mml };
 	try {
-		MmlCompiler::Inner::Sequences sequences;
-		r.ports = Inner::mmlToSequence(mml, sequences);
+		r.ports = Inner::mmlToSequence(*mml, MmlCompiler::Inner::Sequences());
+
+		// 中間イベントのパース
+		struct Channel {
+			double expression = 127.0;	// エクスプレッション (0.0～127.0)
+			double volume = 100.0;		// ボリューム (0.0～127.0)
+			double pan = 64;			// パン (0.0～127.0)
+			double pitchBend = 0.0;		// ピッチベンド (-8192～8191)
+			double fineTune = 0.0;		// FineTune (-100.0～100.0)
+			double coarseTune = 0.0;	// coarseTune (-64.0～63.0)
+		};
+		struct Instrument {
+			double masterVolume = 16383.0;	// マスターボリューム
+			std::map<uint8_t, Channel>	channels;	// <channelNo,Channel>
+		};
+		struct State {
+			std::map<std::string_view, Instrument> instruments;		// <instrument名,Instrument>
+			double tempo = 120.0;			// テンポ
+		}state;
+
+		const auto events = [&] {
+			struct EventInfo {
+				State& state;
+				std::map<std::string_view, Instrument>::iterator itInstrument;
+				std::map<uint8_t, Channel>::iterator itChannel;
+				std::multimap<size_t, std::shared_ptr<const EventBase>>& eventList;
+				std::multimap<size_t, std::shared_ptr<const EventBase>>::iterator itEvent;
+			};
+			std::multimap<size_t, EventInfo> events;
+			for (auto& port : r.ports) {
+				const auto [itInstrument, isInsertedInstrument] = state.instruments.try_emplace(port.instrument);
+				const auto [itChannel, isInsertedChannel] = itInstrument->second.channels.try_emplace(port.channel);
+				for (auto itEvent = port.eventList.begin(); itEvent != port.eventList.end(); itEvent++) {
+					if (std::dynamic_pointer_cast<const Inner::InterEvent>(itEvent->second)) {
+						events.emplace(itEvent->first, EventInfo{ state, itInstrument, itChannel, port.eventList, itEvent });
+					}
+				}
+			}
+			return events;
+		}();
+
+		for (auto& event : events) {
+
+			static const std::map<std::type_index, void (*)(const decltype(events)::value_type&)> map = {
+				{typeid(Inner::InterPitchBend), [](const decltype(events)::value_type& event) {
+					auto& e = static_cast<const Inner::InterPitchBend&>(*event.second.itEvent->second);
+					Channel& ch = event.second.itChannel->second;
+					ch.pitchBend = e.assign.apply(ch.pitchBend);
+					auto ev = std::make_shared<EventPitchBend>();
+					ev->pitchBend = std::clamp(static_cast<int>(std::lround(ch.pitchBend)), -8192, 8191);
+					event.second.itEvent->second = ev;		// Eventを置換
+				}},
+				{typeid(Inner::InterPan), [](const decltype(events)::value_type& event) {
+					auto& e = static_cast<const Inner::InterPan&>(*event.second.itEvent->second);
+					Channel& ch = event.second.itChannel->second;
+					ch.pan = e.assign.apply(ch.pan);
+					auto ev = std::make_shared<EventControlChange>();
+					ev->no = static_cast<decltype(ev->no)>(midi::EventControlChange::Type::pan);
+					ev->value = std::clamp(static_cast<int>(std::lround(ch.pan)), 0, 127);
+					event.second.itEvent->second = ev;		// Eventを置換
+				}},
+				{typeid(Inner::InterExpression), [](const decltype(events)::value_type& event) {
+					auto& e = static_cast<const Inner::InterExpression&>(*event.second.itEvent->second);
+					Channel& ch = event.second.itChannel->second;
+					ch.expression = e.assign.apply(ch.expression);
+					auto ev = std::make_shared<EventControlChange>();
+					ev->no = static_cast<decltype(ev->no)>(midi::EventControlChange::Type::expression);
+					ev->value = std::clamp(static_cast<int>(std::lround(ch.expression)), 0, 127);
+					event.second.itEvent->second = ev;		// Eventを置換
+				}},
+				{typeid(Inner::InterVolume), [](const decltype(events)::value_type& event) {
+					auto& e = static_cast<const Inner::InterVolume&>(*event.second.itEvent->second);
+					Channel& ch = event.second.itChannel->second;
+					ch.volume = e.assign.apply(ch.volume);
+					auto ev = std::make_shared<EventControlChange>();
+					ev->no = static_cast<decltype(ev->no)>(midi::EventControlChange::Type::volume);
+					ev->value = std::clamp(static_cast<int>(std::lround(ch.volume)), 0, 127);
+					event.second.itEvent->second = ev;		// Eventを置換
+				}},
+				{typeid(Inner::InterFineTune), [](const decltype(events)::value_type& event) {
+					auto& e = static_cast<const Inner::InterFineTune&>(*event.second.itEvent->second);
+					Channel& ch = event.second.itChannel->second;
+					ch.fineTune = e.assign.apply(ch.fineTune);
+					const auto toRaw = [](double fineTune) {
+						constexpr double inMin = -100.0, inMax = 100.0;
+						constexpr int outMax = 16383;
+						return std::clamp(static_cast<int>(std::round((fineTune - inMin) * (outMax + 1) / (inMax - inMin))), 0, outMax);	// -8192～0～8192 スケール(+100には微妙に届かない)
+					};
+					const auto raw = toRaw(ch.fineTune);
+
+					struct {
+						midi::EventControlChange::Type no;
+						uint8_t val;
+					}const tbl[] = {
+						{midi::EventControlChange::Type::rpnMSB,		static_cast<uint16_t>(midi::EventControlChange::RpnType::fineTune) / 0x80 & 0x7f	},
+						{midi::EventControlChange::Type::rpnLSB,		static_cast<uint16_t>(midi::EventControlChange::RpnType::fineTune) & 0x7f	},
+						{midi::EventControlChange::Type::dataEntryMSB,	static_cast<uint8_t>(raw / 0x80 & 0x7f)	},
+						{midi::EventControlChange::Type::dataEntryLSB,	static_cast<uint8_t>(raw & 0x7f)	},
+					};
+					for (auto& t : tbl) {
+						auto e = std::make_shared<EventControlChange>();
+						e->no = static_cast<decltype(e->no)>(t.no);
+						e->value = t.val;
+						event.second.eventList.emplace_hint(event.second.itEvent, event.second.itEvent->first, e);	// Eventを挿入
+					}
+					event.second.eventList.erase(event.second.itEvent);	// 不要になったEventを削除
+				}},
+				{typeid(Inner::InterCoarseTune), [](const decltype(events)::value_type& event) {
+					auto& e = static_cast<const Inner::InterCoarseTune&>(*event.second.itEvent->second);
+					Channel& ch = event.second.itChannel->second;
+					ch.coarseTune = e.assign.apply(ch.coarseTune);
+					const int val = std::clamp(static_cast<int>(std::lround(ch.coarseTune)), -64, 63);
+					struct {
+						midi::EventControlChange::Type no;
+						uint8_t val;
+					}const tbl[] = {
+							{midi::EventControlChange::Type::rpnMSB,		static_cast<uint16_t>(midi::EventControlChange::RpnType::coarseTune) / 0x80 & 0x7f	},
+							{midi::EventControlChange::Type::rpnLSB,		static_cast<uint16_t>(midi::EventControlChange::RpnType::coarseTune) & 0x7f	},
+							{midi::EventControlChange::Type::dataEntryMSB,	static_cast<uint8_t>((val + 64) & 0x7f)	},
+							{midi::EventControlChange::Type::dataEntryLSB,	0	},
+					};
+					for (auto& t : tbl) {
+						auto e = std::make_shared<EventControlChange>();
+						e->no = static_cast<decltype(e->no)>(t.no);
+						e->value = t.val;
+						event.second.eventList.emplace_hint(event.second.itEvent, event.second.itEvent->first, e);	// Eventを挿入
+					}
+					event.second.eventList.erase(event.second.itEvent);	// 不要になったEventを削除
+				}},
+				{typeid(Inner::InterMasterVolume), [](const decltype(events)::value_type& event) {
+					auto& e = static_cast<const Inner::InterMasterVolume&>(*event.second.itEvent->second);
+					Instrument& inst = event.second.itInstrument->second;
+					inst.masterVolume = e.assign.apply(inst.masterVolume);
+					auto ev = std::make_shared<EventSystemExclusive>();
+					midi::utility::Bit14 u(static_cast<uint16_t>(std::clamp(static_cast<int>(std::lround(inst.masterVolume)), 0, 16383)));
+					ev->data = { 0xf0, 0x7f, 0x7f, 0x04, 0x1, static_cast<uint8_t>(u.lsb), static_cast<uint8_t>(u.msb), 0xf7 };
+					event.second.itEvent->second = ev;		// Eventを置換
+				}},
+				{typeid(Inner::InterTempo), [](const decltype(events)::value_type& event) {
+					auto& e = static_cast<const Inner::InterTempo&>(*event.second.itEvent->second);
+					event.second.state.tempo = e.assign.apply(event.second.state.tempo);
+					assert(std::isfinite(event.second.state.tempo));
+					auto ev = std::make_shared<EventMeta>();
+					auto t = midi::EventMeta::createTempo(std::clamp(event.second.state.tempo, 1.0, 1000.0));	// createTempoを利用
+					ev->type = static_cast<decltype(ev->type)>(t.type);
+					ev->data = t.data;
+					event.second.itEvent->second = ev;		// Eventを置換
+				}},
+
+			};
+
+			if (const auto i = map.find(typeid(*event.second.itEvent->second)); i != map.end()) {
+				(i->second)(event);
+			}
+
+		}
+
 	} catch (MmlException& e) {
-		r.errors = std::move(e.errors);
+		r.errors = e.errors;
 	}
 	return r;
 }
@@ -1330,8 +1771,6 @@ std::optional<MmlCompiler::Util::ParsedWord> MmlCompiler::Util::parseWord(const 
 
 void MmlCompiler::unitTest() {
 
-	std::string s("1.5e5 is pi");
-	auto a = parseDouble(s);
 
 	{// parseInt
 		std::cout << "parseInt" << std::endl;
@@ -1365,6 +1804,97 @@ void MmlCompiler::unitTest() {
 			} else {
 				assert(r->value == t.result.second);
 				assert(t.result.first == r->next.data() - t.text.data());
+			}
+		}
+	}
+
+	{// parseNum
+		std::cout << "parseNum" << std::endl;
+		using Ope = ParseNum::Ope;
+		struct {
+			std::string text;
+			std::tuple<size_t, Ope, std::variant<intmax_t, double>> res, resOffset;
+		}static const tbl[] = {
+			{"1.5",			{3, Ope::Set, 1.5},		{3, Ope::Set, 1.5},		},
+
+			{"",			{0, Ope::Set, 0},		{0, Ope::Set, 0},		},
+			{"0",			{1, Ope::Set, 0},		{1, Ope::Set, 0},		},
+			{"0a",			{1, Ope::Set, 0},		{1, Ope::Set, 0},		},
+			{"1",			{1, Ope::Set, 1},		{1, Ope::Set, 1},		},
+			{"+1",			{2, Ope::Set, 1},		{2, Ope::Add, 1},		},
+			{"-1",			{2, Ope::Set, -1},		{2, Ope::Sub, 1},		},
+			{"1.5",			{3, Ope::Set, 1.5},		{3, Ope::Set, 1.5},		},
+			{"1.5e4",		{3, Ope::Set, 1.5},		{3, Ope::Set, 1.5},		},	// 指数表記は非サポート
+			{"1.5e-2",		{3, Ope::Set, 1.5},		{3, Ope::Set, 1.5},		},	// 指数表記は非サポート
+			{"1.5e5a",		{3, Ope::Set, 1.5},		{3, Ope::Set, 1.5},		},	// 指数表記は非サポート
+			{"+1.5",		{4, Ope::Set, 1.5},		{4, Ope::Add, 1.5},		},
+			{"-1.5",		{4, Ope::Set, -1.5},	{4, Ope::Sub, 1.5},		},
+			{"0x10",		{4, Ope::Set, 0x10},	{4, Ope::Set, 0x10},	},
+			{"+0x10",		{5, Ope::Set, 0x10},	{5, Ope::Add, 0x10},	},
+			{"-0x10",		{5, Ope::Set, 0 - 0x10},{5, Ope::Sub, 0x10},	},
+			{"0x1a",		{4, Ope::Set, 0x1a},	{4, Ope::Set, 0x1a},	},
+			{"0x1ag",		{4, Ope::Set, 0x1a},	{4, Ope::Set, 0x1a},	},
+			{"0xg",			{0, Ope::Set, 0},		{0, Ope::Set, 0},		},	// 注意: "0x"の次に16進数がない場合はNGとする。("0"まででOKとはしない)
+			{"+0xg",		{0, Ope::Set, 0},		{0, Ope::Set, 0},		},	// 注意: "0x"の次に16進数がない場合はNGとする。("+0"まででOKとはしない)
+
+			{"+=",			{0, Ope::Set, 0},		{0, Ope::Set, 0},		},
+			{"+=0",			{3, Ope::Add, 0},		{3, Ope::Add, 0},		},
+			{"+=0a",		{3, Ope::Add, 0},		{3, Ope::Add, 0},		},
+			{"+=1",			{3, Ope::Add, 1},		{3, Ope::Add, 1},		},
+			{"++=1",		{0, Ope::Set, 0},		{0, Ope::Set, 0},		},
+			{"+-=1",		{0, Ope::Set, 0},		{0, Ope::Set, 0},		},
+			{"+=+1",		{4, Ope::Add, 1},		{4, Ope::Add, 1},		},
+			{"+=-1",		{4, Ope::Add, -1},		{4, Ope::Add, -1},		},
+			{"+=1.5",		{5, Ope::Add, 1.5},		{5, Ope::Add, 1.5},		},
+			{"+=1.5e-2",	{5, Ope::Add, 1.5},		{5, Ope::Add, 1.5},		},	// 指数表記は非サポート
+			{"+=1.5e4",		{5, Ope::Add, 1.5},		{5, Ope::Add, 1.5},		},	// 指数表記は非サポート
+			{"+=-1.5e4",	{6, Ope::Add, -1.5},	{6, Ope::Add, -1.5},	},	// 指数表記は非サポート
+			{"+=+1.5",		{6, Ope::Add, 1.5},		{6, Ope::Add, 1.5},		},
+			{"+=-1.5",		{6, Ope::Add, -1.5},	{6, Ope::Add, -1.5},	},
+			{"+=0x10",		{6, Ope::Add, 0x10},	{6, Ope::Add, 0x10},	},
+			{"+=+0x10",		{7, Ope::Add, 0x10},	{7, Ope::Add, 0x10},	},
+			{"+=-0x10",		{7, Ope::Add, 0 - 0x10},{7, Ope::Add, 0 - 0x10},},
+			{"+=-0xg",		{0, Ope::Set, 0},		{0, Ope::Set, 0},		},
+			{"+=0x1a",		{6, Ope::Add, 0x1a},	{6, Ope::Add, 0x1a},	},
+			{"+=0x1ag",		{6, Ope::Add, 0x1a},	{6, Ope::Add, 0x1a},	},
+
+			{"-=12c",		{4, Ope::Sub, 12},		{4, Ope::Sub, 12},		},
+			{"-=1.5d",		{5, Ope::Sub, 1.5},		{5, Ope::Sub, 1.5},		},
+			{"-=1.5e4a",	{5, Ope::Sub, 1.5},		{5, Ope::Sub, 1.5},		},	// 指数表記は非サポート
+			{"-=0x123ag",	{8, Ope::Sub, 0x123a},	{8, Ope::Sub, 0x123a},	},
+
+			{"/=12c",		{4, Ope::Div, 12},		{4, Ope::Div, 12},		},
+			{"/=1.5d",		{5, Ope::Div, 1.5},		{5, Ope::Div, 1.5},		},
+			{"/=1.5e4a",	{5, Ope::Div, 1.5},		{5, Ope::Div, 1.5},		},	// 指数表記は非サポート
+			{"/=0x123ag",	{8, Ope::Div, 0x123a},	{8, Ope::Div, 0x123a},	},
+
+			{"*=12c",		{4, Ope::Mul, 12},		{4, Ope::Mul, 12},		},
+			{"*=1.5d",		{5, Ope::Mul, 1.5},		{5, Ope::Mul, 1.5},		},
+			{"*=1.5e4a",	{5, Ope::Mul, 1.5},		{5, Ope::Mul, 1.5},		},	// 指数表記は非サポート
+			{"*=0x123ag",	{8, Ope::Mul, 0x123a},	{8, Ope::Mul, 0x123a},	},
+
+		};
+		for (auto& t : tbl) {
+			std::cout << t.text << std::endl;
+			{
+				auto r = ParseNum::parse(t.text);
+				if (std::get<0>(t.res) == 0) {
+					assert(!r);
+				} else {
+					assert(std::get<0>(t.res) == r->next.data() - t.text.data());
+					assert(std::get<1>(t.res) == r->ope);
+					assert(std::get<2>(t.res) == r->value);
+				}
+			}
+			{
+				auto r = ParseNum::parse(t.text, true);
+				if (std::get<0>(t.resOffset) == 0) {
+					assert(!r);
+				} else {
+					assert(std::get<0>(t.resOffset) == r->next.data() - t.text.data());
+					assert(std::get<1>(t.resOffset) == r->ope);
+					assert(std::get<2>(t.resOffset) == r->value);
+				}
 			}
 		}
 	}
@@ -1411,6 +1941,5 @@ void MmlCompiler::unitTest() {
 			}
 		}
 	}
-
 
 }
