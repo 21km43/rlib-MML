@@ -1,4 +1,4 @@
-﻿#include <stdio.h>
+#include <stdio.h>
 #include <emscripten.h>
 #include <emscripten/bind.h>
 
@@ -19,7 +19,7 @@ emscripten::val mmlToSmf(const std::string& mml) {
 		// std::cout << "mmlToSmf" << std::endl;
 		const auto r = rlib::sequencer::mmlToSmf(mml);
 		if (r.hasError()) {
-			const auto errorJson = rlib::sequencer::MmlCompiler::Result::getJson(mml, r.errors);
+			const auto errorJson = r.mmlResult.getJson(r.mmlResult.errors);
 			ret.set("error", errorJson);
 		} else {
 			const auto v = r.smf.getFileImage();

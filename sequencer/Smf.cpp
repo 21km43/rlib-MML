@@ -90,15 +90,15 @@ std::vector<uint8_t> Smf::getFileImage() const
 		auto fEvent = [&](const Event& event) {
 
 			{// DeltaTime
-				assert(event.position >= position);
-				const size_t deltaTime = event.position - position;		// DeltaTime
-				position = event.position;								// 現在位置更新
+				assert(event.first >= position);
+				const size_t deltaTime = event.first - position;		// DeltaTime
+				position = event.first;									// 現在位置更新
 				std::vector<uint8_t> s = midi::utility::getVariableValue(deltaTime);
 				v.insert(v.end(), std::make_move_iterator(s.begin()), std::make_move_iterator(s.end()));
 			}
 
 			{
-				std::vector<uint8_t> t = event.event->smfBytes();
+				std::vector<uint8_t> t = event.second->smfBytes();
 				v.insert(v.end(), std::make_move_iterator(t.begin()), std::make_move_iterator(t.end()));
 			}
 
@@ -111,7 +111,7 @@ std::vector<uint8_t> Smf::getFileImage() const
 		// EndOfTrackがなければ付ける
 		[&] {
 			if (auto i = track.events.rbegin(); i != track.events.rend()) {		// 末尾が EndOfTrack ではないなら
-				if (auto meta = std::dynamic_pointer_cast<const midi::EventMeta>(i->event)) {
+				if (auto meta = std::dynamic_pointer_cast<const midi::EventMeta>(i->second)) {
 					if (meta->type == midi::EventMeta::Type::endOfTrack) {
 						return;
 					}
@@ -348,9 +348,9 @@ Smf Smf::convertTimebase(const Smf& smf, int timeBase) {
 	const auto mul = static_cast<double>(dst.timeBase) / smf.timeBase;
 	for (auto& track : smf.tracks) {
 		Track dstTrack;
-		for (auto& event : track.events) {
-			const auto dstPos = static_cast<decltype(Event::position)>(std::round(event.position * mul));
-			dstTrack.events.emplace(dstPos, event.event);
+		for (auto& [position, event] : track.events) {
+			const auto dstPos = static_cast<decltype(position)>(std::round(position * mul));
+			dstTrack.events.emplace(dstPos, event);
 		}
 		dst.tracks.push_back(dstTrack);
 	}
