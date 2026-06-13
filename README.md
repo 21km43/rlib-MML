@@ -33,6 +33,12 @@ We have confirmed the operation in the following environment.
 
 WebAssembly is also supported.
 
+### Publish Web App with GitHub Pages
+
+- Browser UI is available at `wasm/index.html`.
+- `.github/workflows/deploy-pages.yml` builds the WebAssembly module and deploys it to GitHub Pages.
+- In repository settings, set **Settings > Pages > Build and deployment > Source = GitHub Actions**.
+
 # **MML (Music Macro Language) Syntax**
 
 ## Notes
@@ -113,4 +119,3 @@ Parameters supporting relative adjustment allow math operations on the current v
 ## Licence
 
 [LICENSE](/LICENSE)
-
