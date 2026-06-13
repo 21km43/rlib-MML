@@ -1,0 +1,63 @@
+name: Deploy Web App to GitHub Pages
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libboost-all-dev
+
+      - name: Build wasm module
+        run: |
+          mkdir -p /tmp/emscripten-include
+          cp -R /usr/include/boost /tmp/emscripten-include/
+          export EMCC_CFLAGS="-I/tmp/emscripten-include"
+          emcmake cmake -S wasm -B build/wasm -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/wasm -j"$(nproc)"
+
+      - name: Prepare Pages artifact
+        run: |
+          mkdir -p _site
+          cp wasm/index.html _site/index.html
+          cp build/wasm/rlibmml.js _site/rlibmml.js
+          if [ -f build/wasm/rlibmml.wasm ]; then cp build/wasm/rlibmml.wasm _site/rlibmml.wasm; fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
