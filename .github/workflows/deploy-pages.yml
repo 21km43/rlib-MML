@@ -45,6 +45,7 @@ jobs:
           mkdir -p _site
           cp wasm/index.html _site/index.html
           cp build/wasm/rlibmml.js _site/rlibmml.js
+          if [ -f build/wasm/rlibmml.wasm ]; then cp build/wasm/rlibmml.wasm _site/rlibmml.wasm; fi
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

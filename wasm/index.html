@@ -67,14 +67,17 @@
         }
       };
 
+      const hasError = (result) => Boolean(result && (result.error || result.ok === false));
+      const getErrorValue = (result) => (result && (result.error || result.message)) || "unknown error";
+
       document.getElementById("toSmf").addEventListener("click", async () => {
         try {
           setStatus("変換中...");
           const module = await getModule();
           const mml = document.getElementById("mml").value;
           const result = module.mmlToSmf(mml);
-          if (result.error) {
-            setStatus(`MML -> SMF 変換エラー\n${normalizeError(result.error)}`, true);
+          if (hasError(result)) {
+            setStatus(`MML → SMF 変換エラー\n${normalizeError(getErrorValue(result))}`, true);
             return;
           }
           const bytes = result.result;
@@ -99,12 +102,12 @@
           const buffer = await file.arrayBuffer();
           const module = await getModule();
           const result = module.smfToMml(new Uint8Array(buffer));
-          if (!result.ok) {
-            setStatus(`SMF -> MML 変換エラー\n${result.message || "unknown error"}`, true);
+          if (hasError(result)) {
+            setStatus(`SMF → MML 変換エラー\n${normalizeError(getErrorValue(result))}`, true);
             return;
           }
           document.getElementById("mml").value = result.result;
-          setStatus("SMF -> MML 変換が完了しました。");
+          setStatus("SMF → MML 変換が完了しました。");
         } catch (e) {
           setStatus(`例外: ${e?.message || e}`, true);
         }
