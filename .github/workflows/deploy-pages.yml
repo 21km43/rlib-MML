@@ -3,8 +3,7 @@ name: Deploy Web App to GitHub Pages
 on:
   push:
     branches:
-      - main
-      - master
+      - copilot/create-web-app-with-github-pages
   workflow_dispatch:
 
 permissions:
